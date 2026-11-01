@@ -1,0 +1,22 @@
+# Known gaps and sources
+
+## Known gaps (verify before relying; say so to the user when a template depends on one)
+
+Resolved by the actiondump, samples or the user: all 19 block ids and every header layout, all `target` names, `attribute: NOT` on every `if_*`/`select_obj`/`repeat While` (`if_game`/`if_var` same as `if_player` [U]), `repeat While` wire form, dynamic `call_func` names, **calls to missing functions are no-ops [U]**, all parameter types with plural/optional/default as separate flags, `OR` groups starting an argument list (alternatives at slot 0), `loc`/`vec`/`comp`/`bucket_var` shapes, the absent-`target` rule, **`start_process` tags work like any tag [U]**, Noise/Wait/Range/ParticleCircle/LaunchToward/Bitwise facts, tag slots/options/defaults, legacy twins, alias-as-subAction, version-1 shapes, `isBlock` (display only), `Is Hidden` (hides from the call/start menu), exactly one code line per template, `r_loc` not player-obtainable, **`%{}` does not exist [T]**, `%empty`/`%space`/`%n` do not exist (use `<space>`/`<newline>`) [T], `%var` reads every scope [T], `%index` out-of-range = 0 and trims spaces [T], `%round` truncates toward zero [T], `%random` inclusive [T], `%selected`/`%uuid` fall back to the default target [T], `Selection` with no selection reaches the player but with an EMPTY selection hits nobody [T], an untargeted block after an empty selection does nothing [T], a literal `%` needs no escape and `%%` is not collapsed [T], codes in variable names resolve on set and read [T], message order is normal for every target form [T], numeric `%math` rules (left to right, `%` modulo, no `^`, `1/0`=0, 3-decimal truncation of every intermediate) [T], `%var` line scope wins and undefined = 0 [T], out-of-range `%index`/missing `%entry` key = 0 [T], reversed `%random` bounds work [T].
+
+1. **A parameter that is both optional and plural.** Each flag is shown separately in sample 19, whose own note says it has no combined example; no sample has both `true`. Expected: the same `pn_el` with `plural: true, optional: true`.
+2. **`OR` groups with a leading argument** (e.g. a `VARIABLE` before the `OR`): slot numbering after the `OR` is unverified; groups that start the list are verified (sample 20).
+3. **Untested behaviour** (the user has offered to run tests, so ask): `%bvar` (needs a loaded bucket; `%bvar(bucket,var)` expected when the namespace is omitted), `%call`, how to print a *recognised* code name literally (a backslash does **not** escape: `\%default` printed `<#interpolate:0>`), and what `<#interpolate:N>` means. Rounds 1-3 of `scripts/make_test_templates.py` are done and recorded in `text-codes.md` §5.
+4. **Output-parameter write-back timing** (wire-format.md §3.1) is inferred from samples + a forum design thread. (Plural parameters arrive as a list [S note].)
+5. **Rank gating.** 213 actions carry a required rank (Noble 80, Mythic 64, Overlord 40, Emperor 28, Dev 1); the linter reports it as INFO. Such a template may be unplaceable on lower-rank plots.
+6. **Dump currency.** `assets/actiondump.json` is patch 8.13. When the user supplies a newer dump: replace it, run `python3 scripts/df_dump_to_md.py assets/actiondump.json references`, then `python3 scripts/selftest.py` (all samples should still lint with 0 errors; if not, the format changed and the rules in wire-format.md need review).
+
+## Sources
+
+- User-supplied CodeClient actiondump, patch 8.13 **[A]**; twenty user-supplied templates **[S]**; user statements and the user's quotations from the official DiamondFire reference book **[U]**.
+- DiamondFire Docs — Code Item Changes: http://www.mcdiamondfire.com/docs/dev/code-item-changes/ **[D]**
+- DiamondFire Docs — Bucket variables: http://www.mcdiamondfire.com/docs/bucket-variables/overview/ (+ `/getting-started/`, `/limits/`) **[D]**
+- pyre / dfpyre (template library): https://pypi.org/project/dfpyre/ , https://github.com/Amp63/pyre **[C]**
+- Blackstone: https://github.com/BlackstoneDF/blackstone **[C]**
+- DFOnline wiki — Selection, Variable, Plots (search snippets; pages blocked to my fetcher): https://wiki.dfonline.dev/wiki/Selection , /wiki/Variable , /wiki/Plots **[C]**
+- DF forum — Reference Book (≈2020) https://mcdiamondfire.com/threads/reference-book.396/ ; `%{}` proposal https://mcdiamondfire.com/threads/915/ **[C][P]**; function parameters https://mcdiamondfire.com/threads/how-do-parameters-work.11760 ; function rework https://mcdiamondfire.com/threads/diamondfire-function-rework.2347 **[C]**

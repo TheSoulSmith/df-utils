@@ -5,13 +5,17 @@ impl RawTextNum {
         let num = self.0;
         let mut out = num.to_string();
         if num % 100 == 0 {
+            out.pop();
+            out.pop();
             if num % 1000 != 0 {
+                out.pop();
                 out.insert(out.len() - 1, '.');
             }
         } else {
             if num % 10 == 0 {
                 out.insert(out.len() - 3, '.');
             } else {
+                out.pop();
                 out.insert(out.len() - 4, '.');
             }
         }
@@ -223,7 +227,7 @@ impl StrTextCode {
             }
             Self::Concat { v } => {
                 for i in v {
-                    i.compile_helper(out, false)?;
+                    i.compile_helper(out, should_lint)?;
                 }
             }
             Self::Random { min, max } => {

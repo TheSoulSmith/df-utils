@@ -8,7 +8,10 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
-use super::catalog::{self, Action, ActionSpec, ArgKind, BlockKind, TagSpec};
+use super::catalog::{
+    self, Action, ActionSpec, ArgKind, BlockKind, ParticleCluster, ParticleNumber, ParticleSpec,
+    TagSpec,
+};
 
 #[derive(Debug)]
 pub enum ScriptError {
@@ -109,14 +112,8 @@ pub enum Item {
         mapping_version: u32,
     },
     Particle {
-        id: String,
-        amount: u32,
-        horizontal: f64,
-        vertical: f64,
-        x: f64,
-        y: f64,
-        z: f64,
-        motion_variation: u32,
+        particle: ParticleSpec,
+        cluster: ParticleCluster,
         mapping_version: u32,
     },
     Potion {
@@ -128,6 +125,14 @@ pub enum Item {
 }
 
 impl Item {
+    pub fn particle(particle: ParticleSpec) -> Self {
+        Self::Particle {
+            particle,
+            cluster: ParticleCluster::default(),
+            mapping_version: 0,
+        }
+    }
+
     fn wire_id(&self) -> &'static str {
         match self {
             Self::Number(_) => "num",
@@ -161,11 +166,26 @@ impl Item {
         if expected == Variable {
             return matches!(self, Self::Variable { .. });
         }
-        if matches!(expected, List | Dict) {
-            return matches!(self, Self::Variable { .. });
-        }
-        if matches!(self, Self::Variable { .. } | Self::GameValue { .. }) {
+        if matches!(self, Self::Variable { .. }) {
             return true;
+        }
+        if let Self::Sound { id, .. } = self
+            && !catalog::SOUNDS
+                .iter()
+                .any(|sound| sound.id == catalog_item_id(id))
+        {
+            return false;
+        }
+        if let Self::Potion { id, .. } = self
+            && !catalog::POTIONS
+                .iter()
+                .any(|potion| potion.id == catalog_item_id(id))
+        {
+            return false;
+        }
+        if let Self::GameValue { name, .. } = self {
+            return catalog::find_game_value(name)
+                .is_some_and(|value| expected == AnyType || value.return_type == expected);
         }
         match expected {
             AnyType => true,
@@ -227,29 +247,18 @@ impl Item {
                 "mappingVersion": mapping_version, "sound": id, "pitch": pitch, "vol": volume
             }),
             Self::Particle {
-                id,
-                amount,
-                horizontal,
-                vertical,
-                x,
-                y,
-                z,
-                motion_variation,
+                particle,
+                cluster,
                 mapping_version,
             } => json!({
                 "mappingVersion": mapping_version,
-                "particle": id,
+                "particle": format!("minecraft:{}", particle.id()),
                 "cluster": {
-                    "amount": amount,
-                    "horizontal": horizontal,
-                    "vertical": vertical
+                    "amount": cluster.amount,
+                    "horizontal": cluster.horizontal.to_value(),
+                    "vertical": cluster.vertical.to_value()
                 },
-                "data": {
-                    "x": x,
-                    "y": y,
-                    "z": z,
-                    "motionVariation": motion_variation
-                }
+                "data": particle.to_data()
             }),
             Self::Potion {
                 id,
@@ -331,31 +340,41 @@ impl Item {
                 let cluster = data.get("cluster").ok_or_else(|| {
                     ScriptError::Invalid("particle is missing its cluster data".into())
                 })?;
+                let particle_data =
+                    data.get("data").and_then(Value::as_object).ok_or_else(|| {
+                        ScriptError::Invalid("particle is missing data values".into())
+                    })?;
                 Self::Particle {
-                    id: string_field(data, "particle")?.to_owned(),
-                    amount: cluster
-                        .get("amount")
-                        .and_then(Value::as_u64)
-                        .and_then(|n| u32::try_from(n).ok())
-                        .ok_or_else(|| ScriptError::Invalid("invalid particle amount".into()))?,
-                    horizontal: number_field(cluster, "horizontal")?,
-                    vertical: number_field(cluster, "vertical")?,
-                    x: number_field(
-                        data.get("data").ok_or_else(|| {
-                            ScriptError::Invalid("particle is missing data values".into())
-                        })?,
-                        "x",
-                    )?,
-                    y: number_field(data.get("data").unwrap(), "y")?,
-                    z: number_field(data.get("data").unwrap(), "z")?,
-                    motion_variation: data
-                        .get("data")
-                        .and_then(|values| values.get("motionVariation"))
-                        .and_then(Value::as_u64)
-                        .and_then(|n| u32::try_from(n).ok())
-                        .ok_or_else(|| {
-                            ScriptError::Invalid("invalid particle motion variation".into())
-                        })?,
+                    particle: ParticleSpec::from_wire(
+                        catalog_item_id(string_field(data, "particle")?),
+                        particle_data,
+                    )
+                    .map_err(ScriptError::Invalid)?,
+                    cluster: ParticleCluster {
+                        amount: cluster
+                            .get("amount")
+                            .and_then(Value::as_u64)
+                            .and_then(|n| u32::try_from(n).ok())
+                            .ok_or_else(|| {
+                                ScriptError::Invalid("invalid particle amount".into())
+                            })?,
+                        horizontal: cluster
+                            .get("horizontal")
+                            .and_then(ParticleNumber::from_value)
+                            .ok_or_else(|| {
+                                ScriptError::Invalid(
+                                    "particle cluster is missing numeric horizontal".into(),
+                                )
+                            })?,
+                        vertical: cluster
+                            .get("vertical")
+                            .and_then(ParticleNumber::from_value)
+                            .ok_or_else(|| {
+                                ScriptError::Invalid(
+                                    "particle cluster is missing numeric vertical".into(),
+                                )
+                            })?,
+                    },
                     mapping_version: mapping_version(data)?,
                 }
             }
@@ -2121,6 +2140,10 @@ fn mapping_version(value: &Value) -> Result<u32, ScriptError> {
         .ok_or_else(|| ScriptError::Invalid("missing or invalid mappingVersion".into()))
 }
 
+fn catalog_item_id(id: &str) -> &str {
+    id.strip_prefix("minecraft:").unwrap_or(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2152,6 +2175,186 @@ mod tests {
             .unwrap()
             .with_tag("Time Unit", "Days");
         assert!(invalid_tag.is_err());
+    }
+
+    #[test]
+    fn game_values_match_only_their_catalogued_return_type() {
+        let current_health = Item::GameValue {
+            name: "Current Health".into(),
+            target: "Default".into(),
+        };
+        assert!(current_health.matches(ArgKind::Number));
+        assert!(!current_health.matches(ArgKind::Text));
+
+        let hotbar_items = Item::GameValue {
+            name: "Hotbar Items".into(),
+            target: "Default".into(),
+        };
+        assert!(hotbar_items.matches(ArgKind::List));
+        assert!(!hotbar_items.matches(ArgKind::Item));
+
+        let unknown_value = Item::GameValue {
+            name: "Not a game value".into(),
+            target: "Default".into(),
+        };
+        assert!(!unknown_value.matches(ArgKind::AnyType));
+
+        assert!(
+            Item::Sound {
+                id: "minecraft:block.chain.hit".into(),
+                pitch: 1.0,
+                volume: 1.0,
+                mapping_version: 1,
+            }
+            .matches(ArgKind::Sound)
+        );
+        assert!(
+            !Item::Sound {
+                id: "minecraft:not_a_sound".into(),
+                pitch: 1.0,
+                volume: 1.0,
+                mapping_version: 1,
+            }
+            .matches(ArgKind::Sound)
+        );
+        assert!(
+            !Item::Sound {
+                id: "minecraft:not_a_sound".into(),
+                pitch: 1.0,
+                volume: 1.0,
+                mapping_version: 1,
+            }
+            .matches(ArgKind::AnyType)
+        );
+
+        let send_message = action(BlockKind::PlayerAction, "SendMessage");
+        assert!(ActionCall::new(send_message, vec![current_health]).is_err());
+    }
+
+    #[test]
+    fn generated_catalogs_cover_the_dumped_domains() {
+        assert_eq!(catalog::BLOCKS.len(), 19);
+        assert_eq!(catalog::GAME_VALUES.len(), 143);
+        assert_eq!(catalog::GAME_ACTIONS.len(), 118);
+        assert_eq!(catalog::SOUNDS.len(), 1962);
+        assert_eq!(catalog::PARTICLES.len(), 123);
+        assert!(catalog::PARTICLES.iter().any(|particle| {
+            particle.id == "geyser_base"
+                && particle.fields
+                    == [
+                        "Motion",
+                        "Motion Variation",
+                        "Water Blocks",
+                        "Burst Impulse",
+                    ]
+        }));
+        assert_eq!(catalog::POTIONS.len(), 40);
+        assert!(
+            catalog::GAME_ACTIONS
+                .iter()
+                .all(|action| action.spec().block == BlockKind::GameAction)
+        );
+    }
+
+    #[test]
+    fn particle_item_round_trips_dump_fields_and_preserves_decimal_values() {
+        let item = json!({
+            "version": 1,
+            "id": "part",
+            "data": {
+                "mappingVersion": 0,
+                "particle": "minecraft:geyser_base",
+                "cluster": {
+                    "amount": 4,
+                    "horizontal": 0.125,
+                    "vertical": 0.75
+                },
+                "data": {
+                    "motionVariation": 100,
+                    "x": 1.25,
+                    "y": 2.5,
+                    "z": 3.75,
+                    "waterBlocks": 2.5,
+                    "burstImpulse": 1.5
+                }
+            }
+        });
+
+        let parsed = Item::from_item_value(&item).unwrap();
+        assert_eq!(
+            parsed,
+            Item::Particle {
+                particle: ParticleSpec::GeyserBase {
+                    motion: catalog::ParticleMotion {
+                        x: ParticleNumber::decimal(1.25).unwrap(),
+                        y: ParticleNumber::decimal(2.5).unwrap(),
+                        z: ParticleNumber::decimal(3.75).unwrap(),
+                    },
+                    motion_variation: 100.into(),
+                    water_blocks: ParticleNumber::decimal(2.5).unwrap(),
+                    burst_impulse: ParticleNumber::decimal(1.5).unwrap(),
+                },
+                cluster: catalog::ParticleCluster {
+                    amount: 4,
+                    horizontal: ParticleNumber::decimal(0.125).unwrap(),
+                    vertical: ParticleNumber::decimal(0.75).unwrap(),
+                },
+                mapping_version: 0,
+            }
+        );
+        assert_eq!(parsed.to_value(), item);
+
+        let constructed = Item::particle(ParticleSpec::Dust {
+            color: 0xabcdef,
+            color_variation: 0.into(),
+            size: ParticleNumber::decimal(1.25).unwrap(),
+            size_variation: 0.into(),
+        });
+        assert!(matches!(
+            &constructed,
+            Item::Particle {
+                cluster: catalog::ParticleCluster { amount: 1, .. },
+                ..
+            },
+        ));
+        let encoded = constructed.to_value();
+        assert_eq!(Item::from_item_value(&encoded).unwrap(), constructed);
+    }
+
+    #[test]
+    fn particle_item_requires_exactly_the_fields_in_its_dump_schema() {
+        let mut missing_motion = json!({
+            "version": 1,
+            "id": "part",
+            "data": {
+                "mappingVersion": 0,
+                "particle": "minecraft:geyser_base",
+                "cluster": {"amount": 1, "horizontal": 0.0, "vertical": 0.0},
+                "data": {
+                    "motionVariation": 100,
+                    "waterBlocks": 2,
+                    "burstImpulse": 1.0
+                }
+            }
+        });
+        assert!(Item::from_item_value(&missing_motion).is_err());
+
+        missing_motion["data"]["data"]["x"] = json!(0.0);
+        missing_motion["data"]["data"]["y"] = json!(0.0);
+        missing_motion["data"]["data"]["z"] = json!(0.0);
+        missing_motion["data"]["data"]["other"] = json!(1);
+        assert!(Item::from_item_value(&missing_motion).is_err());
+    }
+
+    #[test]
+    fn supplied_particle_template_parses_and_round_trips() {
+        let code = "H4sIAAAAAAAA/7VVTU/DMAz9KyjnCrWDblNvcOBDIHHbBaHKS9MuWppUSQrb0P47TptBNlVctp6aj+dnPzt2v8lSKLo2JHv/JrwgWb8nkf9mpGwlxS3oCkGIsaz2aFy5k0+mDVeSZEnUMzSgLVoUYMHd19A0XFaLAyyOOgSngiG45pJRDaXNWFky6gypaI1l2tlCrVppO+qV0nynpAWBFNdIgn6RxG/3gT9l0c8CNAfbxxU7l+rLUSbOUldLXE1ns9kkSdGfEkoH+Hi/RzojlHXr6PJKK7Y1TOdLMOx8uRsvautxO/8dTsMXoKt7X/IJVrnVxj7XTSswFiRKA+3JGNoNbcU6pyt8TyOK10qIf/IQiJyMIdJq4OIi6uJBdf37TW/TeRIPvN+IWF5jRJNQ6M0YQgvUl3f+c9QsDe8iOFv4oUGTZDofFmj4jvnau+XxJZrnJRTsuJVvx0jAYVqeO7NcW3J3Tt7uXvLXt0cSRJ6OETmTltttfqmp+1eyeTwfLNnwQFINUIzjtC2ng5JjL3nFZSi5O3P/qY436O3hxB1YliK3UAU8qukDIw8gutHsrjPybK6eeFEw97CBekixlVBzevqjDJxP9x+/+SFsA3WDFcCzH3+L5HtzBwAA";
+        let parsed = Script::decompile(code).unwrap();
+        let compiled = parsed.compile().unwrap();
+        assert_eq!(
+            parsed.to_value(),
+            Script::decompile(&compiled).unwrap().to_value()
+        );
     }
 
     #[test]

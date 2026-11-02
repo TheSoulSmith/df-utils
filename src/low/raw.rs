@@ -9,7 +9,12 @@ use serde_json::{Map, Value};
 mod catalog;
 mod typed;
 
-pub use catalog::{Action, ActionSpec, ArgKind, BlockKind, TagSpec};
+pub use catalog::{
+    ACTION_SPECS, Action, ActionSpec, ArgKind, ArgumentSpec, BLOCKS, BlockKind, BlockSpec,
+    GAME_ACTIONS, GAME_VALUES, GameValueSpec, PARTICLES, POTIONS, ParticleCluster,
+    ParticleKindSpec, ParticleMotion, ParticleNumber, ParticleSpec, PotionSpec, SOUNDS, SoundSpec,
+    TagSpec,
+};
 pub use typed::{
     ActionCall, Block, BlockLength as TypedBlockLength, ConditionParts, FunctionParameter, Header,
     Item, ParameterType, Script, ScriptError, Tag, Target, VariableScope,

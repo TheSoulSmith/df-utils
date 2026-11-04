@@ -1,17 +1,42 @@
 //! Strongly typed DiamondFire lines backed by the generated action catalog.
 //! Wire JSON is used only at import/export boundaries; script bodies are Rust
-//! enums and nested control-flow nodes. Unsupported actiondump OR signatures
-//! can be imported and preserved, but cannot be newly constructed.
+//! enums and nested control-flow nodes. Each generated action enum owns its
+//! parameters, tag options, and wire serialization.
 
 use std::error::Error;
 use std::fmt;
 
 use serde_json::{Map, Value, json};
 
-use super::catalog::{
-    self, Action, ActionSpec, ArgKind, BlockKind, ParticleCluster, ParticleNumber, ParticleSpec,
-    TagSpec,
+use super::{
+    super::text_codes::StrTextCode,
+    catalog::{self, BlockKind, ParticleCluster, ParticleSpec},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemKind {
+    AnyType,
+    Block,
+    BlockTag,
+    Byte,
+    Component,
+    Dialog,
+    Dict,
+    EntityType,
+    Item,
+    List,
+    Location,
+    Number,
+    Particle,
+    Potion,
+    Projectile,
+    Sound,
+    SpawnEgg,
+    Text,
+    Variable,
+    Vector,
+    Vehicle,
+}
 
 #[derive(Debug)]
 pub enum ScriptError {
@@ -37,6 +62,27 @@ impl Error for ScriptError {
     }
 }
 
+pub trait WireAction {
+    fn to_wire_value(&self) -> Value;
+    fn sub_action_wire_name(&self) -> String;
+}
+
+impl WireAction for ActionCall {
+    fn to_wire_value(&self) -> Value {
+        self.to_value()
+    }
+
+    fn sub_action_wire_name(&self) -> String {
+        self.0
+            .get("subAction")
+            .or_else(|| self.0.get("action"))
+            .or_else(|| self.0.get("data"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+}
+
 impl From<serde_json::Error> for ScriptError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
@@ -58,16 +104,6 @@ impl VariableScope {
             Self::Local => "local",
             Self::Unsaved => "unsaved",
             Self::Saved => "saved",
-        }
-    }
-
-    fn from_wire(value: &str) -> Option<Self> {
-        match value {
-            "line" => Some(Self::Line),
-            "local" => Some(Self::Local),
-            "unsaved" => Some(Self::Unsaved),
-            "saved" => Some(Self::Saved),
-            _ => None,
         }
     }
 }
@@ -161,8 +197,8 @@ impl Item {
         }
     }
 
-    fn matches(&self, expected: ArgKind) -> bool {
-        use ArgKind::*;
+    pub(crate) fn matches(&self, expected: ItemKind) -> bool {
+        use ItemKind::*;
         if expected == Variable {
             return matches!(self, Self::Variable { .. });
         }
@@ -207,7 +243,7 @@ impl Item {
         }
     }
 
-    fn to_value(&self) -> Value {
+    pub(crate) fn to_value(&self) -> Value {
         let data = match self {
             Self::Number(name) | Self::Text(name) | Self::Component(name) => json!({"name": name}),
             Self::Variable { name, scope } => {
@@ -271,178 +307,6 @@ impl Item {
         };
         json!({"version": self.version(), "id": self.wire_id(), "data": data})
     }
-
-    fn from_value(value: &Value) -> Result<Self, ScriptError> {
-        let item = value
-            .get("item")
-            .ok_or_else(|| ScriptError::Invalid("slotted item has no `item` object".into()))?;
-        Self::from_item_value(item)
-    }
-
-    fn from_item_value(item: &Value) -> Result<Self, ScriptError> {
-        let id = string_field(item, "id")?;
-        let data = item
-            .get("data")
-            .ok_or_else(|| ScriptError::Invalid(format!("{id} item has no data")))?;
-        let read_num = |field: &str| -> Result<f64, ScriptError> {
-            data.get(field).and_then(Value::as_f64).ok_or_else(|| {
-                ScriptError::Invalid(format!("{id} item is missing numeric {field}"))
-            })
-        };
-        let result = match id {
-            "num" => Self::Number(string_field(data, "name")?.to_owned()),
-            "txt" => Self::Text(string_field(data, "name")?.to_owned()),
-            "comp" => Self::Component(string_field(data, "name")?.to_owned()),
-            "var" => Self::Variable {
-                name: string_field(data, "name")?.to_owned(),
-                scope: VariableScope::from_wire(string_field(data, "scope")?)
-                    .ok_or_else(|| ScriptError::Invalid("variable has an unknown scope".into()))?,
-            },
-            "g_val" => Self::GameValue {
-                name: string_field(data, "type")?.to_owned(),
-                target: string_field(data, "target")?.to_owned(),
-            },
-            "bucket_var" => Self::BucketVariable {
-                name: string_field(data, "name")?.to_owned(),
-                bucket: string_field(data, "key")?.to_owned(),
-                namespace_type: string_field(data, "namespace_type")?.to_owned(),
-                namespace_alias: string_field(data, "namespace_alias")?.to_owned(),
-            },
-            "loc" => {
-                let loc = data
-                    .get("loc")
-                    .ok_or_else(|| ScriptError::Invalid("location has no `loc` object".into()))?;
-                Self::Location {
-                    x: number_field(loc, "x")?,
-                    y: number_field(loc, "y")?,
-                    z: number_field(loc, "z")?,
-                    pitch: number_field(loc, "pitch")?,
-                    yaw: number_field(loc, "yaw")?,
-                    block_aligned: data
-                        .get("isBlock")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                }
-            }
-            "vec" => Self::Vector {
-                x: read_num("x")?,
-                y: read_num("y")?,
-                z: read_num("z")?,
-            },
-            "item" => Self::MinecraftItem(string_field(data, "item")?.to_owned()),
-            "snd" => Self::Sound {
-                id: string_field(data, "sound")?.to_owned(),
-                pitch: read_num("pitch")?,
-                volume: read_num("vol")?,
-                mapping_version: mapping_version(data)?,
-            },
-            "part" => {
-                let cluster = data.get("cluster").ok_or_else(|| {
-                    ScriptError::Invalid("particle is missing its cluster data".into())
-                })?;
-                let particle_data =
-                    data.get("data").and_then(Value::as_object).ok_or_else(|| {
-                        ScriptError::Invalid("particle is missing data values".into())
-                    })?;
-                Self::Particle {
-                    particle: ParticleSpec::from_wire(
-                        catalog_item_id(string_field(data, "particle")?),
-                        particle_data,
-                    )
-                    .map_err(ScriptError::Invalid)?,
-                    cluster: ParticleCluster {
-                        amount: cluster
-                            .get("amount")
-                            .and_then(Value::as_u64)
-                            .and_then(|n| u32::try_from(n).ok())
-                            .ok_or_else(|| {
-                                ScriptError::Invalid("invalid particle amount".into())
-                            })?,
-                        horizontal: cluster
-                            .get("horizontal")
-                            .and_then(ParticleNumber::from_value)
-                            .ok_or_else(|| {
-                                ScriptError::Invalid(
-                                    "particle cluster is missing numeric horizontal".into(),
-                                )
-                            })?,
-                        vertical: cluster
-                            .get("vertical")
-                            .and_then(ParticleNumber::from_value)
-                            .ok_or_else(|| {
-                                ScriptError::Invalid(
-                                    "particle cluster is missing numeric vertical".into(),
-                                )
-                            })?,
-                    },
-                    mapping_version: mapping_version(data)?,
-                }
-            }
-            "pot" => Self::Potion {
-                id: string_field(data, "pot")?.to_owned(),
-                duration_ticks: data
-                    .get("dur")
-                    .and_then(Value::as_u64)
-                    .and_then(|n| u32::try_from(n).ok())
-                    .ok_or_else(|| ScriptError::Invalid("invalid potion duration".into()))?,
-                amplifier: data
-                    .get("amp")
-                    .and_then(Value::as_u64)
-                    .and_then(|n| u8::try_from(n).ok())
-                    .ok_or_else(|| ScriptError::Invalid("invalid potion amplifier".into()))?,
-                mapping_version: mapping_version(data)?,
-            },
-            other => {
-                return Err(ScriptError::Invalid(format!(
-                    "unsupported wire item type {other:?}"
-                )));
-            }
-        };
-        let expected_version = result.version();
-        if item.get("version").and_then(Value::as_u64) != Some(u64::from(expected_version)) {
-            return Err(ScriptError::Invalid(format!(
-                "wire item {id:?} has an unsupported version"
-            )));
-        }
-        Ok(result)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Tag {
-    name: String,
-    option: String,
-    owner_block: BlockKind,
-    owner_action: String,
-}
-
-impl Tag {
-    pub fn new(action: Action, name: &str, option: &str) -> Result<Self, ScriptError> {
-        let spec = action.spec();
-        let tag_spec = find_tag(spec, name).ok_or_else(|| {
-            ScriptError::Invalid(format!("{} has no tag named {name:?}", spec.name))
-        })?;
-        if !tag_spec.options.contains(&option) {
-            return Err(ScriptError::Invalid(format!(
-                "{option:?} is not a valid option for {}",
-                tag_spec.name
-            )));
-        }
-        let owner_action = if matches!(
-            spec.block,
-            BlockKind::IfPlayer | BlockKind::IfEntity | BlockKind::IfVar | BlockKind::IfGame
-        ) {
-            spec.aliases.first().copied().unwrap_or(spec.name)
-        } else {
-            spec.name
-        };
-        Ok(Self {
-            name: name.to_owned(),
-            option: option.to_owned(),
-            owner_block: spec.block,
-            owner_action: owner_action.to_owned(),
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -478,132 +342,23 @@ impl Target {
     }
 }
 
+/// A wire block stored in a script; prefer generated action enums for creation.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ActionCall {
-    action: Action,
-    dynamic_name: Option<String>,
-    sub_action: Option<Action>,
-    imported: bool,
-    arguments: Vec<(usize, Item)>,
-    tags: Vec<Tag>,
-    target: Option<Target>,
-    negated: bool,
-}
+pub struct ActionCall(Value);
 
 impl ActionCall {
-    pub fn new(action: Action, arguments: Vec<Item>) -> Result<Self, ScriptError> {
-        if matches!(
-            action.spec().block,
-            BlockKind::CallFunc | BlockKind::StartProcess
-        ) {
-            return Err(ScriptError::Invalid(
-                "use ActionCall::dynamic for a function or process call".into(),
-            ));
-        }
-        if let Some(replacement) = action.spec().legacy_replacement {
-            return Err(ScriptError::Invalid(format!(
-                "{} is deprecated; use {replacement}",
-                action.spec().name
-            )));
-        }
-        if action.spec().sub_action_blocks.is_empty() {
-            validate_arguments(action.spec(), &arguments)?;
-        }
-        if arguments.len() > 27 {
-            return Err(ScriptError::Invalid(
-                "a DiamondFire block chest has 27 slots".into(),
-            ));
-        }
-        Ok(Self {
-            action,
-            dynamic_name: None,
-            sub_action: None,
-            imported: false,
-            arguments: arguments.into_iter().enumerate().collect(),
-            tags: Vec::new(),
-            target: None,
-            negated: false,
-        })
+    pub fn new(value: Value) -> Result<Self, ScriptError> {
+        Self::from_value(&value)
     }
 
-    pub fn dynamic(
-        action: Action,
-        name: impl Into<String>,
-        arguments: Vec<Item>,
-    ) -> Result<Self, ScriptError> {
-        if !matches!(
-            action.spec().block,
-            BlockKind::CallFunc | BlockKind::StartProcess
-        ) {
-            return Err(ScriptError::Invalid(
-                "dynamic calls are only valid for call_func and start_process".into(),
-            ));
-        }
-        if arguments.len() > 25 {
-            return Err(ScriptError::Invalid(
-                "dynamic calls have at most 25 argument slots".into(),
-            ));
-        }
-        let name = name.into();
-        if name.is_empty() {
-            return Err(ScriptError::Invalid(
-                "function or process call name cannot be empty".into(),
-            ));
-        }
-        Ok(Self {
-            action,
-            dynamic_name: Some(name),
-            sub_action: None,
-            imported: false,
-            arguments: arguments.into_iter().enumerate().collect(),
-            tags: Vec::new(),
-            target: None,
-            negated: false,
-        })
-    }
-
-    pub fn with_sub_action(mut self, sub_action: Action) -> Result<Self, ScriptError> {
-        if !self
-            .action
-            .spec()
-            .sub_action_blocks
-            .contains(&sub_action.spec().block)
-        {
-            return Err(ScriptError::Invalid(format!(
-                "{} does not accept a {} sub-action",
-                self.action.spec().name,
-                sub_action.spec().block.as_wire()
-            )));
-        }
-        validate_arguments(
-            sub_action.spec(),
-            &self
-                .arguments
-                .iter()
-                .map(|(_, item)| item.clone())
-                .collect::<Vec<_>>(),
-        )?;
-        self.sub_action = Some(sub_action);
-        Ok(self)
-    }
-
-    pub fn with_tag(mut self, name: &str, option: &str) -> Result<Self, ScriptError> {
-        let owner = self.tag_owner();
-        let tag = Tag::new(owner, name, option)?;
-        if self.tags.iter().any(|existing| existing.name == tag.name) {
-            return Err(ScriptError::Invalid(format!(
-                "tag {:?} was set more than once",
-                tag.name
-            )));
-        }
-        self.tags.push(tag);
-        Ok(self)
+    pub fn from_action(value: impl WireAction) -> Result<Self, ScriptError> {
+        Self::new(value.to_wire_value())
     }
 
     pub fn with_target(mut self, target: Target) -> Result<Self, ScriptError> {
-        let kind = self.action.spec().block;
+        let block = self.block_kind();
         if !matches!(
-            kind,
+            block,
             BlockKind::PlayerAction
                 | BlockKind::EntityAction
                 | BlockKind::IfPlayer
@@ -611,10 +366,10 @@ impl ActionCall {
         ) {
             return Err(ScriptError::Invalid(format!(
                 "{} does not accept a target",
-                kind.as_wire()
+                block.as_wire()
             )));
         }
-        if matches!(kind, BlockKind::PlayerAction | BlockKind::IfPlayer)
+        if matches!(block, BlockKind::PlayerAction | BlockKind::IfPlayer)
             && matches!(
                 target,
                 Target::Projectile | Target::AllEntities | Target::AllMobs | Target::LastEntity
@@ -624,13 +379,13 @@ impl ActionCall {
                 "target is not supported by this player block".into(),
             ));
         }
-        self.target = Some(target);
+        self.0["target"] = json!(target.as_wire());
         Ok(self)
     }
 
     pub fn negated(mut self) -> Result<Self, ScriptError> {
         if !matches!(
-            self.action.spec().block,
+            self.block_kind(),
             BlockKind::IfPlayer
                 | BlockKind::IfEntity
                 | BlockKind::IfVar
@@ -642,330 +397,33 @@ impl ActionCall {
                 "NOT is only supported by conditional, repeat, and selection blocks".into(),
             ));
         }
-        self.negated = true;
+        self.0["attribute"] = json!("NOT");
         Ok(self)
     }
 
-    pub fn action(&self) -> Action {
-        self.action
-    }
-
-    pub fn arguments(&self) -> impl Iterator<Item = &Item> {
-        self.arguments.iter().map(|(_, item)| item)
-    }
-
-    pub fn with_arguments(mut self, arguments: Vec<Item>) -> Result<Self, ScriptError> {
-        if arguments.len() > 25
-            && matches!(
-                self.action.spec().block,
-                BlockKind::CallFunc | BlockKind::StartProcess
-            )
-        {
-            return Err(ScriptError::Invalid(
-                "dynamic calls have at most 25 argument slots".into(),
-            ));
-        }
-        let signature = self.sub_action.unwrap_or(self.action).spec();
-        if !matches!(
-            self.action.spec().block,
-            BlockKind::CallFunc | BlockKind::StartProcess
-        ) {
-            if self.imported {
-                validate_imported_arguments(signature, &arguments)?;
-            } else {
-                validate_arguments(signature, &arguments)?;
-            }
-        }
-        self.arguments = arguments.into_iter().enumerate().collect();
-        self.imported = false;
-        self.validate_complete()?;
-        Ok(self)
-    }
-
-    pub fn without_tag(mut self, name: &str) -> Self {
-        self.tags.retain(|tag| tag.name != name);
-        self
-    }
-
-    fn validate_complete(&self) -> Result<(), ScriptError> {
-        let spec = self.action.spec();
-        if let Some(replacement) = spec.legacy_replacement {
-            return Err(ScriptError::Invalid(format!(
-                "{} is deprecated; use {replacement}",
-                spec.name
-            )));
-        }
-        if let Some(sub_action) = self.sub_action
-            && let Some(replacement) = sub_action.spec().legacy_replacement
-        {
-            return Err(ScriptError::Invalid(format!(
-                "{} is deprecated; use {replacement}",
-                sub_action.spec().name
-            )));
-        }
-        let signature = self.sub_action.unwrap_or(self.action).spec();
-        let arguments = self
-            .arguments
-            .iter()
-            .map(|(_, item)| item.clone())
-            .collect::<Vec<_>>();
-        if !matches!(spec.block, BlockKind::CallFunc | BlockKind::StartProcess) {
-            if self.imported {
-                validate_imported_arguments(signature, &arguments)?;
-            } else {
-                validate_arguments(signature, &arguments)?;
-            }
-        }
-        if !spec.sub_action_blocks.is_empty() && self.sub_action.is_none() {
-            return Err(ScriptError::Invalid(format!(
-                "{} requires a condition sub-action",
-                spec.name
-            )));
-        }
-        if self.negated
-            && !matches!(
-                spec.block,
-                BlockKind::IfPlayer
-                    | BlockKind::IfEntity
-                    | BlockKind::IfVar
-                    | BlockKind::IfGame
-                    | BlockKind::SelectObj
-                    | BlockKind::Repeat
-            )
-        {
-            return Err(ScriptError::Invalid(
-                "NOT is not supported on this block".into(),
-            ));
-        }
-        self.validate_tags()
-    }
-
-    fn tag_owner(&self) -> Action {
-        self.sub_action.unwrap_or(self.action)
+    fn block_kind(&self) -> BlockKind {
+        BlockKind::from_wire(self.0["block"].as_str().expect("validated block"))
+            .expect("validated block")
     }
 
     fn to_value(&self) -> Value {
-        let spec = self.action.spec();
-        let mut fields = serde_json::Map::new();
-        fields.insert("id".into(), json!("block"));
-        fields.insert("block".into(), json!(spec.block.as_wire()));
-        if let Some(name) = &self.dynamic_name {
-            fields.insert("data".into(), json!(name));
-        } else {
-            fields.insert("action".into(), json!(spec.name));
-        }
-        if let Some(target) = self.target {
-            fields.insert("target".into(), json!(target.as_wire()));
-        }
-        if self.negated {
-            fields.insert("attribute".into(), json!("NOT"));
-        }
-        if let Some(sub_action) = self.sub_action {
-            fields.insert("subAction".into(), json!(sub_action_wire_name(sub_action)));
-        }
-        let mut items: Vec<Value> = self
-            .arguments
-            .iter()
-            .map(|(slot, argument)| json!({"item": argument.to_value(), "slot": slot}))
-            .collect();
-        for tag in &self.tags {
-            let Some(tag_spec) = find_tag(self.tag_owner().spec(), &tag.name) else {
-                continue;
-            };
-            items.push(json!({
-                "item": {
-                    "version": 0,
-                    "id": "bl_tag",
-                    "data": {
-                        "tag": tag.name,
-                        "option": tag.option,
-                        "action": tag.owner_action,
-                        "block": tag.owner_block.as_wire()
-                    }
-                },
-                "slot": tag_spec.slot
-            }));
-        }
-        items.sort_by_key(|item| item.get("slot").and_then(Value::as_u64).unwrap_or(0));
-        fields.insert("args".into(), json!({"items": items}));
-        if !spec.sub_action_blocks.is_empty() && self.sub_action.is_none() {
-            fields.insert("subAction".into(), json!(spec.sub_action));
-        }
-        Value::Object(fields)
+        self.0.clone()
     }
 
     fn from_value(value: &Value) -> Result<Self, ScriptError> {
-        let block = BlockKind::from_wire(string_field(value, "block")?)
-            .ok_or_else(|| ScriptError::Invalid("unknown block type".into()))?;
-        let dynamic_name = if matches!(block, BlockKind::CallFunc | BlockKind::StartProcess) {
-            Some(string_field(value, "data")?.to_owned())
-        } else {
-            None
-        };
-        let action_name = if dynamic_name.is_some() {
-            "dynamic"
-        } else {
-            string_field(value, "action")?
-        };
-        let base_action = Action::from_wire(block, action_name).ok_or_else(|| {
-            ScriptError::Invalid(format!(
-                "action {action_name:?} is not in the bundled actiondump for {}",
-                block.as_wire()
-            ))
-        })?;
-        let mut arguments = Vec::new();
-        let mut tags = Vec::new();
-        if let Some(items) = value
-            .get("args")
-            .and_then(|args| args.get("items"))
-            .and_then(Value::as_array)
-        {
-            for entry in items {
-                let slot = entry
-                    .get("slot")
-                    .and_then(Value::as_u64)
-                    .and_then(|slot| usize::try_from(slot).ok())
-                    .ok_or_else(|| ScriptError::Invalid("invalid item slot".into()))?;
-                let id = entry
-                    .get("item")
-                    .and_then(|item| item.get("id"))
-                    .and_then(Value::as_str);
-                if id == Some("bl_tag") {
-                    let data = entry
-                        .get("item")
-                        .and_then(|item| item.get("data"))
-                        .ok_or_else(|| ScriptError::Invalid("tag has no data".into()))?;
-                    let name = string_field(data, "tag")?;
-                    let option = string_field(data, "option")?;
-                    let owner_name = string_field(data, "action")?;
-                    let owner_block = BlockKind::from_wire(string_field(data, "block")?)
-                        .ok_or_else(|| ScriptError::Invalid("unknown tag owner block".into()))?;
-                    let owner = find_action_by_owner(owner_block, owner_name).ok_or_else(|| {
-                        ScriptError::Invalid(format!("unknown tag owner {owner_name:?}"))
-                    })?;
-                    let mut tag = Tag::new(owner, name, option)?;
-                    if find_tag(owner.spec(), name).map(|spec| spec.slot) != Some(slot as u8) {
-                        return Err(ScriptError::Invalid(format!(
-                            "tag {name:?} is in the wrong chest slot"
-                        )));
-                    }
-                    tag.owner_block = owner_block;
-                    tag.owner_action = owner_name.to_owned();
-                    tags.push((slot, tag));
-                } else {
-                    arguments.push((slot, Item::from_value(entry)?));
-                }
-            }
-        }
-        arguments.sort_by_key(|(slot, _)| *slot);
-        tags.sort_by_key(|(slot, _)| *slot);
-        let ordered_args: Vec<Item> = arguments.iter().map(|(_, item)| item.clone()).collect();
-        let action = if base_action.spec().sub_action_blocks.is_empty()
-            && !matches!(block, BlockKind::CallFunc | BlockKind::StartProcess)
-        {
-            resolve_action(block, action_name, &ordered_args).unwrap_or(base_action)
-        } else {
-            base_action
-        };
-        let sub_action = value
-            .get("subAction")
+        let block = value
+            .get("block")
             .and_then(Value::as_str)
-            .and_then(|sub| find_sub_action(action, sub, &ordered_args));
-        if !action.spec().sub_action_blocks.is_empty() && sub_action.is_none() {
+            .ok_or_else(|| ScriptError::Invalid("block is missing its block type".into()))?;
+        if BlockKind::from_wire(block).is_none() {
             return Err(ScriptError::Invalid(format!(
-                "{} requires a recognized condition sub-action",
-                action.spec().name
+                "unknown block type {block:?}"
             )));
         }
-        if let Some(sub_action) = sub_action {
-            validate_imported_arguments(sub_action.spec(), &ordered_args)?;
-        } else if action.spec().sub_action_blocks.is_empty()
-            && !matches!(block, BlockKind::CallFunc | BlockKind::StartProcess)
-        {
-            validate_imported_arguments(action.spec(), &ordered_args)?;
+        if value.get("id").and_then(Value::as_str) != Some("block") {
+            return Err(ScriptError::Invalid("expected a block value".into()));
         }
-        let mut call = Self {
-            action,
-            dynamic_name,
-            sub_action,
-            imported: true,
-            arguments,
-            tags: tags.into_iter().map(|(_, tag)| tag).collect(),
-            target: match value.get("target") {
-                None => None,
-                Some(target) => Some(
-                    target
-                        .as_str()
-                        .and_then(target_from_wire)
-                        .ok_or_else(|| ScriptError::Invalid("unknown target value".into()))?,
-                ),
-            },
-            negated: match value.get("attribute").and_then(Value::as_str) {
-                None => false,
-                Some("NOT") => true,
-                Some(_) => return Err(ScriptError::Invalid("unknown block attribute".into())),
-            },
-        };
-        call.validate_complete()?;
-        if let Some(target) = call.target {
-            call = call.with_target(target)?;
-        }
-        Ok(call)
-    }
-
-    fn validate_tags(&self) -> Result<(), ScriptError> {
-        let mut used_slots = Vec::new();
-        for (slot, _) in &self.arguments {
-            if *slot > 26 || used_slots.contains(slot) {
-                return Err(ScriptError::Invalid(
-                    "invalid or duplicate argument chest slot".into(),
-                ));
-            }
-            used_slots.push(*slot);
-        }
-        for tag in &self.tags {
-            let spec = find_tag(self.tag_owner().spec(), &tag.name)
-                .ok_or_else(|| ScriptError::Invalid(format!("unknown tag {:?}", tag.name)))?;
-            if tag.owner_block != self.tag_owner().spec().block {
-                return Err(ScriptError::Invalid(format!(
-                    "tag {:?} belongs to a different block",
-                    tag.name
-                )));
-            }
-            if !spec.options.contains(&tag.option.as_str()) {
-                return Err(ScriptError::Invalid(format!(
-                    "invalid option {:?} for tag {:?}",
-                    tag.option, tag.name
-                )));
-            }
-            if used_slots.contains(&(spec.slot as usize)) {
-                return Err(ScriptError::Invalid(
-                    "argument and tag items overlap a chest slot".into(),
-                ));
-            }
-            let owner = self.tag_owner();
-            let expected_action = if matches!(
-                owner.spec().block,
-                BlockKind::IfPlayer | BlockKind::IfEntity | BlockKind::IfVar | BlockKind::IfGame
-            ) {
-                owner
-                    .spec()
-                    .aliases
-                    .first()
-                    .copied()
-                    .unwrap_or(owner.spec().name)
-            } else {
-                owner.spec().name
-            };
-            if tag.owner_block != owner.spec().block || tag.owner_action != expected_action {
-                return Err(ScriptError::Invalid(format!(
-                    "tag {:?} has an owner inconsistent with its block",
-                    tag.name
-                )));
-            }
-            used_slots.push(spec.slot as usize);
-        }
-        Ok(())
+        Ok(Self(value.clone()))
     }
 }
 
@@ -1026,44 +484,24 @@ impl ParameterType {
         }
     }
 
-    fn from_wire(value: &str) -> Option<Self> {
-        Some(match value {
-            "txt" => Self::Text,
-            "comp" => Self::Component,
-            "num" => Self::Number,
-            "loc" => Self::Location,
-            "vec" => Self::Vector,
-            "snd" => Self::Sound,
-            "part" => Self::Particle,
-            "pot" => Self::Potion,
-            "item" => Self::Item,
-            "dialog" => Self::Dialog,
-            "any" => Self::Any,
-            "var" => Self::Variable,
-            "list" => Self::List,
-            "dict" => Self::Dictionary,
-            _ => return None,
-        })
-    }
-
     fn accepts(self, item: &Item) -> bool {
         if self == Self::Dialog {
             return false;
         }
         item.matches(match self {
-            Self::Text => ArgKind::Text,
-            Self::Component => ArgKind::Component,
-            Self::Number => ArgKind::Number,
-            Self::Location => ArgKind::Location,
-            Self::Vector => ArgKind::Vector,
-            Self::Sound => ArgKind::Sound,
-            Self::Particle => ArgKind::Particle,
-            Self::Potion => ArgKind::Potion,
-            Self::Item => ArgKind::Item,
-            Self::Any => ArgKind::AnyType,
-            Self::Variable => ArgKind::Variable,
-            Self::List => ArgKind::List,
-            Self::Dictionary => ArgKind::Dict,
+            Self::Text => ItemKind::Text,
+            Self::Component => ItemKind::Component,
+            Self::Number => ItemKind::Number,
+            Self::Location => ItemKind::Location,
+            Self::Vector => ItemKind::Vector,
+            Self::Sound => ItemKind::Sound,
+            Self::Particle => ItemKind::Particle,
+            Self::Potion => ItemKind::Potion,
+            Self::Item => ItemKind::Item,
+            Self::Any => ItemKind::AnyType,
+            Self::Variable => ItemKind::Variable,
+            Self::List => ItemKind::List,
+            Self::Dictionary => ItemKind::Dict,
             Self::Dialog => return false,
         })
     }
@@ -1082,7 +520,6 @@ pub struct FunctionParameter {
 
 type SlottedParameters = Vec<(usize, FunctionParameter)>;
 type SlottedItems = Vec<(usize, Item)>;
-type ParsedFunctionHeader = (SlottedParameters, SlottedItems);
 
 impl FunctionParameter {
     pub fn new(name: impl Into<String>, parameter_type: ParameterType) -> Self {
@@ -1117,16 +554,17 @@ impl FunctionParameter {
 }
 
 impl Header {
-    pub fn event(action: Action, arguments: Vec<Item>) -> Result<Self, ScriptError> {
+    pub fn event(action: impl WireAction) -> Result<Self, ScriptError> {
+        let action = ActionCall::from_action(action)?;
         if !matches!(
-            action.spec().block,
+            action.block_kind(),
             BlockKind::Event | BlockKind::EntityEvent | BlockKind::GameEvent
         ) {
             return Err(ScriptError::Invalid(
                 "event header requires a player, entity, or game event action".into(),
             ));
         }
-        Ok(Self(HeaderKind::Event(ActionCall::new(action, arguments)?)))
+        Ok(Self(HeaderKind::Event(action)))
     }
 
     pub fn function(name: impl Into<String>, hidden: bool) -> Result<Self, ScriptError> {
@@ -1277,28 +715,6 @@ impl Header {
             }
         }
     }
-
-    fn from_value(value: &Value) -> Result<Self, ScriptError> {
-        match value.get("block").and_then(Value::as_str) {
-            Some("event" | "entity_event" | "game_event") => {
-                Ok(Self(HeaderKind::Event(ActionCall::from_value(value)?)))
-            }
-            Some("func") => {
-                let (parameters, extra_items) = header_parameters(value)?;
-                Self::function_from_parts(
-                    string_field(value, "data")?.to_owned(),
-                    header_hidden(value)?,
-                    header_has_hint(value),
-                    parameters,
-                    extra_items,
-                )
-            }
-            Some("process") => Self::process(string_field(value, "data")?, header_hidden(value)?),
-            _ => Err(ScriptError::Invalid(
-                "template must begin with an event, function, or process header".into(),
-            )),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1320,21 +736,55 @@ enum BlockKindNode {
 
 pub type ConditionParts<'a> = (&'a ActionCall, &'a [Block], Option<&'a [Block]>);
 
+/// A group of instructions that can be measured independently before being
+/// inlined into a code line.
+#[derive(Clone, Debug)]
+pub struct Chunk {
+    instructions: Vec<Block>,
+    io: Vec<(StrTextCode, VariableScope, bool)>,
+}
+
+impl Chunk {
+    pub fn new() -> Self {
+        Self {
+            instructions: Vec::new(),
+            io: Vec::new(),
+        }
+    }
+
+    pub fn instructions(&self) -> &[Block] {
+        &self.instructions
+    }
+
+    pub fn push(&mut self, instruction: Block) {
+        self.instructions.push(instruction);
+    }
+
+    pub fn block_count(&self) -> usize {
+        count_blocks(&self.instructions)
+    }
+
+    pub fn measure(&self, limit: usize) -> BlockLength {
+        BlockLength {
+            blocks: self.block_count(),
+            limit,
+        }
+    }
+}
+
 impl Block {
-    pub fn action(action: Action, arguments: Vec<Item>) -> Result<Self, ScriptError> {
-        let call = ActionCall::new(action, arguments)?;
-        call.validate_complete()?;
-        if is_structural(call.action.spec().block) {
+    pub fn action(action: impl WireAction) -> Result<Self, ScriptError> {
+        let action = ActionCall::from_action(action)?;
+        if is_structural(action.block_kind()) {
             return Err(ScriptError::Invalid(
                 "headers, conditions, and repeats must use their structured constructors".into(),
             ));
         }
-        Ok(Self(BlockKindNode::Action(call)))
+        Ok(Self(BlockKindNode::Action(action)))
     }
 
     pub fn call(call: ActionCall) -> Result<Self, ScriptError> {
-        call.validate_complete()?;
-        if is_structural(call.action.spec().block) {
+        if is_structural(call.block_kind()) {
             return Err(ScriptError::Invalid(
                 "headers, conditions, and repeats must use their structured constructors".into(),
             ));
@@ -1343,12 +793,12 @@ impl Block {
     }
 
     pub fn conditional(
-        condition: ActionCall,
+        condition: impl WireAction,
         then_body: Vec<Block>,
         else_body: Option<Vec<Block>>,
     ) -> Result<Self, ScriptError> {
-        condition.validate_complete()?;
-        if !is_condition(condition.action.spec().block) {
+        let condition = ActionCall::from_action(condition)?;
+        if !is_condition(condition.block_kind()) {
             return Err(ScriptError::Invalid(
                 "conditional requires an if-player/entity/game/variable action".into(),
             ));
@@ -1360,9 +810,9 @@ impl Block {
         }))
     }
 
-    pub fn repeat(repeat: ActionCall, body: Vec<Block>) -> Result<Self, ScriptError> {
-        repeat.validate_complete()?;
-        if repeat.action.spec().block != BlockKind::Repeat {
+    pub fn repeat(repeat: impl WireAction, body: Vec<Block>) -> Result<Self, ScriptError> {
+        let repeat = ActionCall::from_action(repeat)?;
+        if repeat.block_kind() != BlockKind::Repeat {
             return Err(ScriptError::Invalid(
                 "repeat requires a repeat action".into(),
             ));
@@ -1398,10 +848,10 @@ impl Block {
 
 /// A structurally valid DiamondFire line: it always has one header, and
 /// conditions/repeats own their nested bodies instead of exposing brackets.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Script {
     header: Header,
-    body: Vec<Block>,
+    chunks: Vec<Chunk>,
     metadata: Map<String, Value>,
 }
 
@@ -1409,13 +859,17 @@ impl Script {
     pub fn new(header: Header) -> Self {
         Self {
             header,
-            body: Vec::new(),
+            chunks: Vec::new(),
             metadata: Map::new(),
         }
     }
 
-    pub fn body(&self) -> &[Block] {
-        &self.body
+    pub fn chunks(&self) -> &[Chunk] {
+        &self.chunks
+    }
+
+    pub fn push_chunk(&mut self, chunk: Chunk) {
+        self.chunks.push(chunk);
     }
 
     pub fn header(&self) -> &Header {
@@ -1426,41 +880,49 @@ impl Script {
         self.header = header;
     }
 
-    pub fn push(&mut self, block: Block) {
-        self.body.push(block);
+    pub fn push(&mut self, chunk: Chunk) {
+        self.chunks.push(chunk);
     }
 
-    pub fn insert(&mut self, index: usize, block: Block) -> Result<(), ScriptError> {
-        if index > self.body.len() {
-            return Err(ScriptError::Invalid(format!(
-                "block index {index} exceeds body length {}",
-                self.body.len()
-            )));
+    pub fn insert(&mut self, index: usize, chunk: Chunk) -> Result<(), ScriptError> {
+        if self.chunks.len() < index {
+            Err(ScriptError::Invalid(format!(
+                "index {} exceeds length {}",
+                index,
+                self.chunks.len()
+            )))
+        } else {
+            self.chunks.insert(index, chunk);
+            Ok(())
         }
-        self.body.insert(index, block);
-        Ok(())
     }
 
-    pub fn remove(&mut self, index: usize) -> Result<Block, ScriptError> {
-        if index >= self.body.len() {
-            return Err(ScriptError::Invalid(format!(
-                "block index {index} exceeds body length {}",
-                self.body.len()
-            )));
+    pub fn remove(&mut self, index: usize) -> Result<Chunk, ScriptError> {
+        if index >= self.chunks.len() {
+            Err(ScriptError::Invalid(format!(
+                "index {} exceeds maximum {}",
+                index,
+                self.chunks.len() - 1
+            )))
+        } else {
+            Ok(self.chunks.remove(index))
         }
-        Ok(self.body.remove(index))
     }
 
-    pub fn replace(&mut self, index: usize, block: Block) -> Result<Block, ScriptError> {
-        let len = self.body.len();
-        let current = self.body.get_mut(index).ok_or_else(|| {
-            ScriptError::Invalid(format!("block index {index} exceeds body length {len}"))
-        })?;
-        Ok(std::mem::replace(current, block))
+    pub fn replace(&mut self, index: usize, chunk: Chunk) -> Result<Chunk, ScriptError> {
+        if index >= self.chunks.len() {
+            Err(ScriptError::Invalid(format!(
+                "index {} exceeds maximum {}",
+                index,
+                self.chunks.len() - 1
+            )))
+        } else {
+            Ok(std::mem::replace(&mut self.chunks[index], chunk))
+        }
     }
 
     pub fn block_count(&self) -> usize {
-        1 + count_blocks(&self.body)
+        1 + self.chunks.iter().map(Chunk::block_count).sum::<usize>()
     }
 
     pub fn measure(&self, limit: usize) -> BlockLength {
@@ -1472,7 +934,9 @@ impl Script {
 
     pub fn to_value(&self) -> Value {
         let mut blocks = vec![self.header.to_value()];
-        encode_blocks(&self.body, &mut blocks);
+        for chunk in &self.chunks {
+            encode_blocks(&chunk.instructions, &mut blocks);
+        }
         let mut root = self.metadata.clone();
         root.insert("blocks".into(), json!(blocks));
         Value::Object(root)
@@ -1486,45 +950,10 @@ impl Script {
         Ok(serde_json::to_string_pretty(&self.to_value())?)
     }
 
-    pub fn from_json(json_text: &str) -> Result<Self, ScriptError> {
-        Self::from_value(serde_json::from_str(json_text)?)
-    }
-
-    pub fn from_value(value: Value) -> Result<Self, ScriptError> {
-        let mut metadata = value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| ScriptError::Invalid("template root must be an object".into()))?;
-        let blocks = metadata
-            .remove("blocks")
-            .and_then(|value| value.as_array().cloned())
-            .ok_or_else(|| ScriptError::Invalid("missing `blocks` array".into()))?;
-        let header_value = blocks
-            .first()
-            .ok_or_else(|| ScriptError::Invalid("code line is empty".into()))?;
-        let header = Header::from_value(header_value)?;
-        let mut cursor = 1;
-        let body = parse_sequence(&blocks, &mut cursor, None)?;
-        if cursor != blocks.len() {
-            return Err(ScriptError::Invalid("unexpected trailing bracket".into()));
-        }
-        Ok(Self {
-            header,
-            body,
-            metadata,
-        })
-    }
-
     pub fn compile(&self) -> Result<String, ScriptError> {
-        if let HeaderKind::Event(call) = &self.header.0
-            && let Some(replacement) = call.action.spec().legacy_replacement
-        {
-            return Err(ScriptError::Invalid(format!(
-                "cannot compile deprecated event {}; use {replacement}",
-                call.action.spec().name
-            )));
+        for chunk in &self.chunks {
+            self.validate_compilable(&chunk.instructions)?;
         }
-        self.validate_compilable(&self.body)?;
         let json = serde_json::to_vec(&self.to_value())?;
         let mut encoder = flate2::GzBuilder::new()
             .mtime(0)
@@ -1538,40 +967,6 @@ impl Script {
                 .finish()
                 .map_err(|error| ScriptError::Invalid(error.to_string()))?,
         ))
-    }
-
-    pub fn decompile(code: &str) -> Result<Self, ScriptError> {
-        use base64::Engine;
-        use std::io::Read;
-        let compact: String = code
-            .chars()
-            .filter(|ch| !ch.is_ascii_whitespace())
-            .collect();
-        let mut compact = compact;
-        while compact.ends_with('=') {
-            compact.pop();
-        }
-        match compact.len() % 4 {
-            0 => {}
-            2 => compact.push_str("=="),
-            3 => compact.push('='),
-            _ => {
-                return Err(ScriptError::Invalid(
-                    "template code has an invalid Base64 length".into(),
-                ));
-            }
-        }
-        let compressed = base64::engine::general_purpose::STANDARD
-            .decode(compact)
-            .map_err(|error| ScriptError::Invalid(error.to_string()))?;
-        let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
-        let mut json = Vec::new();
-        decoder
-            .read_to_end(&mut json)
-            .map_err(|error| ScriptError::Invalid(error.to_string()))?;
-        Self::from_json(
-            std::str::from_utf8(&json).map_err(|error| ScriptError::Invalid(error.to_string()))?,
-        )
     }
 
     fn validate_compilable(&self, blocks: &[Block]) -> Result<(), ScriptError> {
@@ -1595,13 +990,7 @@ impl Script {
                 }
             };
             for call in calls {
-                call.validate_complete()?;
-                if let Some(replacement) = call.action.spec().legacy_replacement {
-                    return Err(ScriptError::Invalid(format!(
-                        "cannot compile deprecated action {}; use {replacement}",
-                        call.action.spec().name
-                    )));
-                }
+                ActionCall::from_value(&call.to_value())?;
             }
         }
         Ok(())
@@ -1622,157 +1011,6 @@ impl BlockLength {
     pub fn excess(self) -> usize {
         self.blocks.saturating_sub(self.limit)
     }
-}
-
-fn validate_arguments(spec: &ActionSpec, args: &[Item]) -> Result<(), ScriptError> {
-    if matches_arguments(spec.arguments, args, 0, 0) {
-        Ok(())
-    } else {
-        Err(ScriptError::Invalid(format!(
-            "arguments [{}] do not match {} {} signature [{}]",
-            args.iter()
-                .map(Item::wire_id)
-                .collect::<Vec<_>>()
-                .join(", "),
-            spec.block.as_wire(),
-            spec.name,
-            spec.arguments
-                .iter()
-                .map(|arg| format!(
-                    "{:?}{}{}",
-                    arg.kind,
-                    if arg.optional { "?" } else { "" },
-                    if arg.plural { "*" } else { "" }
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )))
-    }
-}
-
-fn validate_imported_arguments(spec: &ActionSpec, args: &[Item]) -> Result<(), ScriptError> {
-    if matches_arguments_relaxed(spec.arguments, args, 0, 0) {
-        Ok(())
-    } else {
-        validate_arguments(spec, args)
-    }
-}
-
-fn resolve_action(block: BlockKind, name: &str, args: &[Item]) -> Option<Action> {
-    let mut candidates = Action::ALL.iter().copied().filter(|action| {
-        let spec = action.spec();
-        spec.block == block && spec.name == name
-    });
-    candidates
-        .clone()
-        .find(|action| matches_arguments(action.spec().arguments, args, 0, 0))
-        .or_else(|| {
-            candidates.find(|action| matches_arguments_relaxed(action.spec().arguments, args, 0, 0))
-        })
-}
-
-fn matches_arguments_relaxed(
-    specs: &[catalog::ArgumentSpec],
-    args: &[Item],
-    spec_index: usize,
-    arg_index: usize,
-) -> bool {
-    if spec_index == specs.len() {
-        return arg_index == args.len();
-    }
-    let spec = specs[spec_index];
-    let max_count = if spec.plural {
-        args.len().saturating_sub(arg_index)
-    } else {
-        1
-    };
-    for count in 0..=max_count {
-        let end = arg_index + count;
-        if end > args.len()
-            || !args[arg_index..end]
-                .iter()
-                .all(|arg| arg.matches(spec.kind))
-        {
-            continue;
-        }
-        if matches_arguments_relaxed(specs, args, spec_index + 1, end) {
-            return true;
-        }
-    }
-    false
-}
-
-fn matches_arguments(
-    specs: &[catalog::ArgumentSpec],
-    args: &[Item],
-    spec_index: usize,
-    arg_index: usize,
-) -> bool {
-    if spec_index == specs.len() {
-        return arg_index == args.len();
-    }
-    let spec = specs[spec_index];
-    let min_count = usize::from(!spec.optional);
-    let max_count = if spec.plural {
-        args.len().saturating_sub(arg_index)
-    } else {
-        1
-    };
-    for count in min_count..=max_count {
-        if count == 0 && !spec.optional {
-            continue;
-        }
-        let end = arg_index + count;
-        if end > args.len()
-            || !args[arg_index..end]
-                .iter()
-                .all(|arg| arg.matches(spec.kind))
-        {
-            continue;
-        }
-        if matches_arguments(specs, args, spec_index + 1, end) {
-            return true;
-        }
-    }
-    false
-}
-
-fn find_tag<'a>(spec: &'a ActionSpec, name: &str) -> Option<&'a TagSpec> {
-    spec.tags.iter().find(|tag| tag.name == name)
-}
-
-fn sub_action_wire_name(action: Action) -> &'static str {
-    let spec = action.spec();
-    if !spec.sub_action.is_empty() {
-        spec.sub_action
-    } else {
-        spec.aliases.first().copied().unwrap_or(spec.name)
-    }
-}
-
-fn find_sub_action(parent: Action, wire_name: &str, args: &[Item]) -> Option<Action> {
-    let mut candidates = Action::ALL.iter().copied().filter(|candidate| {
-        let spec = candidate.spec();
-        parent.spec().sub_action_blocks.contains(&spec.block)
-            && (spec.name == wire_name
-                || spec.sub_action == wire_name
-                || spec.aliases.contains(&wire_name))
-    });
-    candidates
-        .clone()
-        .find(|action| matches_arguments(action.spec().arguments, args, 0, 0))
-        .or_else(|| {
-            candidates.find(|action| matches_arguments_relaxed(action.spec().arguments, args, 0, 0))
-        })
-}
-
-fn find_action_by_owner(block: BlockKind, wire_name: &str) -> Option<Action> {
-    Action::ALL.iter().copied().find(|action| {
-        action.spec().block == block
-            && (action.spec().name == wire_name
-                || action.spec().aliases.contains(&wire_name)
-                || action.spec().sub_action == wire_name)
-    })
 }
 
 fn dynamic_header(
@@ -1841,101 +1079,6 @@ fn dynamic_header(
     })
 }
 
-fn header_hidden(value: &Value) -> Result<bool, ScriptError> {
-    for item in value
-        .get("args")
-        .and_then(|args| args.get("items"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let data = item.get("item").and_then(|item| item.get("data"));
-        if data
-            .and_then(|data| data.get("tag"))
-            .and_then(Value::as_str)
-            == Some("Is Hidden")
-        {
-            return match data
-                .and_then(|data| data.get("option"))
-                .and_then(Value::as_str)
-            {
-                Some("True") => Ok(true),
-                Some("False") => Ok(false),
-                other => Err(ScriptError::Invalid(format!(
-                    "invalid Is Hidden option {other:?}"
-                ))),
-            };
-        }
-    }
-    Ok(false)
-}
-
-fn header_has_hint(value: &Value) -> bool {
-    value
-        .get("args")
-        .and_then(|args| args.get("items"))
-        .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items.iter().any(|entry| {
-                entry
-                    .get("item")
-                    .and_then(|item| item.get("id"))
-                    .and_then(Value::as_str)
-                    == Some("hint")
-            })
-        })
-}
-
-fn header_parameters(value: &Value) -> Result<ParsedFunctionHeader, ScriptError> {
-    let mut parameters = Vec::new();
-    let mut extra_items = Vec::new();
-    for item in value
-        .get("args")
-        .and_then(|args| args.get("items"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let Some(wire_item) = item.get("item") else {
-            continue;
-        };
-        let slot = item
-            .get("slot")
-            .and_then(Value::as_u64)
-            .and_then(|slot| usize::try_from(slot).ok())
-            .ok_or_else(|| ScriptError::Invalid("invalid function chest slot".into()))?;
-        match wire_item.get("id").and_then(Value::as_str) {
-            Some("pn_el") => {}
-            Some("hint" | "bl_tag") => continue,
-            _ => {
-                extra_items.push((slot, Item::from_value(item)?));
-                continue;
-            }
-        }
-        let data = wire_item
-            .get("data")
-            .ok_or_else(|| ScriptError::Invalid("parameter item has no data".into()))?;
-        let parameter_type = ParameterType::from_wire(string_field(data, "type")?)
-            .ok_or_else(|| ScriptError::Invalid("unknown function parameter type".into()))?;
-        let mut parameter = FunctionParameter::new(string_field(data, "name")?, parameter_type);
-        parameter.plural = data.get("plural").and_then(Value::as_bool).unwrap_or(false);
-        parameter.optional = data
-            .get("optional")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        parameter.description = data
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        parameter.note = data.get("note").and_then(Value::as_str).map(str::to_owned);
-        if let Some(default_value) = data.get("default_value") {
-            parameter.default_value = Some(Item::from_item_value(default_value)?);
-        }
-        parameters.push((slot, parameter));
-    }
-    Ok((parameters, extra_items))
-}
-
 fn encode_blocks(blocks: &[Block], output: &mut Vec<Value>) {
     for block in blocks {
         match &block.0 {
@@ -1987,95 +1130,6 @@ fn count_blocks(blocks: &[Block]) -> usize {
         .sum()
 }
 
-fn parse_sequence(
-    blocks: &[Value],
-    cursor: &mut usize,
-    expected_close: Option<&str>,
-) -> Result<Vec<Block>, ScriptError> {
-    let mut output = Vec::new();
-    while *cursor < blocks.len() {
-        let value = &blocks[*cursor];
-        if value.get("id").and_then(Value::as_str) == Some("bracket") {
-            let direct = string_field(value, "direct")?;
-            let bracket_type = string_field(value, "type")?;
-            if direct == "close" {
-                if expected_close == Some(bracket_type) {
-                    *cursor += 1;
-                    return Ok(output);
-                }
-                return Err(ScriptError::Invalid(
-                    "unmatched or mistyped closing bracket".into(),
-                ));
-            }
-            return Err(ScriptError::Invalid("unexpected opening bracket".into()));
-        }
-        if value.get("block").and_then(Value::as_str) == Some("else") {
-            return Err(ScriptError::Invalid(
-                "else must follow a conditional block".into(),
-            ));
-        }
-        let call = ActionCall::from_value(value)?;
-        match call.action.spec().block {
-            kind if is_condition(kind) => {
-                *cursor += 1;
-                expect_open(blocks, cursor, "norm")?;
-                let then_body = parse_sequence(blocks, cursor, Some("norm"))?;
-                let else_body = if blocks
-                    .get(*cursor)
-                    .and_then(|next| next.get("block"))
-                    .and_then(Value::as_str)
-                    == Some("else")
-                {
-                    *cursor += 1;
-                    expect_open(blocks, cursor, "norm")?;
-                    Some(parse_sequence(blocks, cursor, Some("norm"))?)
-                } else {
-                    None
-                };
-                output.push(Block(BlockKindNode::If {
-                    condition: call,
-                    then_body,
-                    else_body,
-                }));
-            }
-            BlockKind::Repeat => {
-                *cursor += 1;
-                expect_open(blocks, cursor, "repeat")?;
-                let body = parse_sequence(blocks, cursor, Some("repeat"))?;
-                output.push(Block(BlockKindNode::Repeat { repeat: call, body }));
-            }
-            _ => {
-                if is_structural(call.action.spec().block) {
-                    return Err(ScriptError::Invalid("unexpected structural block".into()));
-                }
-                *cursor += 1;
-                output.push(Block(BlockKindNode::Action(call)));
-            }
-        }
-    }
-    if expected_close.is_some() {
-        Err(ScriptError::Invalid("unclosed block bracket".into()))
-    } else {
-        Ok(output)
-    }
-}
-
-fn expect_open(blocks: &[Value], cursor: &mut usize, expected: &str) -> Result<(), ScriptError> {
-    let bracket = blocks
-        .get(*cursor)
-        .ok_or_else(|| ScriptError::Invalid("missing opening bracket".into()))?;
-    if bracket.get("id").and_then(Value::as_str) != Some("bracket")
-        || bracket.get("direct").and_then(Value::as_str) != Some("open")
-        || bracket.get("type").and_then(Value::as_str) != Some(expected)
-    {
-        return Err(ScriptError::Invalid(format!(
-            "expected opening {expected} bracket after control block"
-        )));
-    }
-    *cursor += 1;
-    Ok(())
-}
-
 fn bracket(direct: &str, kind: &str) -> Value {
     json!({"id": "bracket", "direct": direct, "type": kind})
 }
@@ -2101,45 +1155,6 @@ fn is_structural(kind: BlockKind) -> bool {
         )
 }
 
-fn target_from_wire(value: &str) -> Option<Target> {
-    Some(match value {
-        "Selection" => Target::Selection,
-        "Default" => Target::Default,
-        "Killer" => Target::Killer,
-        "Damager" => Target::Damager,
-        "Shooter" => Target::Shooter,
-        "Victim" => Target::Victim,
-        "AllPlayers" => Target::AllPlayers,
-        "Projectile" => Target::Projectile,
-        "AllEntities" => Target::AllEntities,
-        "AllMobs" => Target::AllMobs,
-        "LastEntity" => Target::LastEntity,
-        _ => return None,
-    })
-}
-
-fn string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str, ScriptError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| ScriptError::Invalid(format!("missing string field {field:?}")))
-}
-
-fn number_field(value: &Value, field: &str) -> Result<f64, ScriptError> {
-    value
-        .get(field)
-        .and_then(Value::as_f64)
-        .ok_or_else(|| ScriptError::Invalid(format!("missing numeric field {field:?}")))
-}
-
-fn mapping_version(value: &Value) -> Result<u32, ScriptError> {
-    value
-        .get("mappingVersion")
-        .and_then(Value::as_u64)
-        .and_then(|version| u32::try_from(version).ok())
-        .ok_or_else(|| ScriptError::Invalid("missing or invalid mappingVersion".into()))
-}
-
 fn catalog_item_id(id: &str) -> &str {
     id.strip_prefix("minecraft:").unwrap_or(id)
 }
@@ -2148,33 +1163,110 @@ fn catalog_item_id(id: &str) -> &str {
 mod tests {
     use super::*;
 
-    fn action(block: BlockKind, name: &str) -> Action {
-        Action::from_wire(block, name).expect("action exists in generated catalog")
+    #[test]
+    fn generated_action_values_serialize_named_parameters_and_enum_tags() {
+        use super::catalog::actions::{PlayerAction, TagOptionsCenteredRegular};
+
+        let action = PlayerAction::SendMessage {
+            params: (Some(vec![Item::Component("hello".into())]),),
+            tags: (Some(TagOptionsCenteredRegular::Centered), None, None),
+        };
+        let wire = action.to_wire();
+
+        assert_eq!(wire["block"], "player_action");
+        assert_eq!(wire["action"], "SendMessage");
+        assert_eq!(wire["subAction"], "SendMessage");
+        let items = wire["args"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["slot"], 0);
+        assert_eq!(items[0]["item"]["id"], "comp");
+        assert_eq!(items[1]["slot"], 26);
+        assert_eq!(items[1]["item"]["data"]["tag"], "Alignment Mode");
+        assert_eq!(items[1]["item"]["data"]["option"], "Centered");
     }
 
     #[test]
-    fn action_signature_and_tags_are_checked_at_construction() {
-        let send_message = action(BlockKind::PlayerAction, "SendMessage");
-        assert!(ActionCall::new(send_message, vec![Item::Component("hello".into())]).is_ok());
-        assert!(ActionCall::new(send_message, vec![Item::Number("1".into())]).is_err());
+    fn generated_hotbar_action_preserves_empty_slot_positions() {
+        use super::catalog::actions::PlayerAction;
 
-        let wait = action(BlockKind::Control, "Wait");
-        assert!(ActionCall::new(wait, vec![Item::Number("2".into())]).is_ok());
-        let legacy = action(BlockKind::PlayerAction, "NoNatRegen");
-        assert!(ActionCall::new(legacy, vec![]).is_err());
-        let alternative = action(BlockKind::IfPlayer, "HasRoomForItem");
-        assert!(ActionCall::new(alternative, vec![]).is_err());
-        assert!(ActionCall::new(Action::IfPlayerHasroomforitemAlternative2, vec![]).is_ok());
+        let action = PlayerAction::SetHotbar {
+            params: (
+                Some(Item::MinecraftItem("minecraft:stone".into())),
+                None,
+                Some(Item::MinecraftItem("minecraft:dirt".into())),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            tags: (),
+        };
+        let wire = action.to_wire();
+        let items = wire["args"]["items"].as_array().unwrap();
 
-        let wait = ActionCall::new(wait, vec![])
-            .unwrap()
-            .with_tag("Time Unit", "Ticks")
-            .unwrap();
-        assert!(Block::call(wait).is_ok());
-        let invalid_tag = ActionCall::new(action(BlockKind::Control, "Wait"), vec![])
-            .unwrap()
-            .with_tag("Time Unit", "Days");
-        assert!(invalid_tag.is_err());
+        assert_eq!(wire["subAction"], "SetHotbar");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["slot"], 0);
+        assert_eq!(items[1]["slot"], 2);
+    }
+
+    #[test]
+    fn generated_action_values_serialize_condition_sub_actions() {
+        use super::catalog::actions::{IfVar, SelectObj, SelectObjPlayerscondSubAction};
+
+        let condition = IfVar::Empty {
+            params: (Item::Number("1".into()), Item::Number("2".into())),
+            tags: (),
+        };
+        let action = SelectObj::PlayersCond {
+            params: (),
+            tags: (),
+            sub_action: SelectObjPlayerscondSubAction::IfVar(condition),
+        };
+        let wire = action.to_wire();
+
+        assert_eq!(wire["block"], "select_obj");
+        assert_eq!(wire["action"], "PlayersCond");
+        assert_eq!(wire["subAction"], "<=");
+        assert_eq!(wire["args"]["items"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn generated_dynamic_action_values_encode_names_and_arguments() {
+        use super::catalog::actions::{
+            CallFunc, StartProcess, TagOptionsForEachInSelectionWithCurrentSelection,
+        };
+
+        let action = CallFunc::Dynamic {
+            name: "worker.run".into(),
+            params: vec![Item::Number("7".into())],
+            tags: (),
+        };
+        let wire = action.to_wire();
+
+        assert_eq!(wire["block"], "call_func");
+        assert_eq!(wire["data"], "worker.run");
+        assert_eq!(wire["args"]["items"][0]["slot"], 0);
+        assert_eq!(wire["args"]["items"][0]["item"]["id"], "num");
+
+        let process = StartProcess::Dynamic {
+            name: "worker.loop".into(),
+            params: Vec::new(),
+            tags: (
+                Some(TagOptionsForEachInSelectionWithCurrentSelection::WithNoTargets),
+                None,
+            ),
+        };
+        let wire = process.to_wire();
+        assert_eq!(wire["block"], "start_process");
+        assert_eq!(wire["data"], "worker.loop");
+        assert_eq!(wire["args"]["items"][0]["slot"], 26);
+        assert_eq!(
+            wire["args"]["items"][0]["item"]["data"]["option"],
+            "With no targets"
+        );
     }
 
     #[test]
@@ -2183,21 +1275,21 @@ mod tests {
             name: "Current Health".into(),
             target: "Default".into(),
         };
-        assert!(current_health.matches(ArgKind::Number));
-        assert!(!current_health.matches(ArgKind::Text));
+        assert!(current_health.matches(ItemKind::Number));
+        assert!(!current_health.matches(ItemKind::Text));
 
         let hotbar_items = Item::GameValue {
             name: "Hotbar Items".into(),
             target: "Default".into(),
         };
-        assert!(hotbar_items.matches(ArgKind::List));
-        assert!(!hotbar_items.matches(ArgKind::Item));
+        assert!(hotbar_items.matches(ItemKind::List));
+        assert!(!hotbar_items.matches(ItemKind::Item));
 
         let unknown_value = Item::GameValue {
             name: "Not a game value".into(),
             target: "Default".into(),
         };
-        assert!(!unknown_value.matches(ArgKind::AnyType));
+        assert!(!unknown_value.matches(ItemKind::AnyType));
 
         assert!(
             Item::Sound {
@@ -2206,7 +1298,7 @@ mod tests {
                 volume: 1.0,
                 mapping_version: 1,
             }
-            .matches(ArgKind::Sound)
+            .matches(ItemKind::Sound)
         );
         assert!(
             !Item::Sound {
@@ -2215,7 +1307,7 @@ mod tests {
                 volume: 1.0,
                 mapping_version: 1,
             }
-            .matches(ArgKind::Sound)
+            .matches(ItemKind::Sound)
         );
         assert!(
             !Item::Sound {
@@ -2224,18 +1316,14 @@ mod tests {
                 volume: 1.0,
                 mapping_version: 1,
             }
-            .matches(ArgKind::AnyType)
+            .matches(ItemKind::AnyType)
         );
-
-        let send_message = action(BlockKind::PlayerAction, "SendMessage");
-        assert!(ActionCall::new(send_message, vec![current_health]).is_err());
     }
 
     #[test]
     fn generated_catalogs_cover_the_dumped_domains() {
         assert_eq!(catalog::BLOCKS.len(), 19);
         assert_eq!(catalog::GAME_VALUES.len(), 143);
-        assert_eq!(catalog::GAME_ACTIONS.len(), 118);
         assert_eq!(catalog::SOUNDS.len(), 1962);
         assert_eq!(catalog::PARTICLES.len(), 123);
         assert!(catalog::PARTICLES.iter().any(|particle| {
@@ -2249,275 +1337,5 @@ mod tests {
                     ]
         }));
         assert_eq!(catalog::POTIONS.len(), 40);
-        assert!(
-            catalog::GAME_ACTIONS
-                .iter()
-                .all(|action| action.spec().block == BlockKind::GameAction)
-        );
-    }
-
-    #[test]
-    fn particle_item_round_trips_dump_fields_and_preserves_decimal_values() {
-        let item = json!({
-            "version": 1,
-            "id": "part",
-            "data": {
-                "mappingVersion": 0,
-                "particle": "minecraft:geyser_base",
-                "cluster": {
-                    "amount": 4,
-                    "horizontal": 0.125,
-                    "vertical": 0.75
-                },
-                "data": {
-                    "motionVariation": 100,
-                    "x": 1.25,
-                    "y": 2.5,
-                    "z": 3.75,
-                    "waterBlocks": 2.5,
-                    "burstImpulse": 1.5
-                }
-            }
-        });
-
-        let parsed = Item::from_item_value(&item).unwrap();
-        assert_eq!(
-            parsed,
-            Item::Particle {
-                particle: ParticleSpec::GeyserBase {
-                    motion: catalog::ParticleMotion {
-                        x: ParticleNumber::decimal(1.25).unwrap(),
-                        y: ParticleNumber::decimal(2.5).unwrap(),
-                        z: ParticleNumber::decimal(3.75).unwrap(),
-                    },
-                    motion_variation: 100.into(),
-                    water_blocks: ParticleNumber::decimal(2.5).unwrap(),
-                    burst_impulse: ParticleNumber::decimal(1.5).unwrap(),
-                },
-                cluster: catalog::ParticleCluster {
-                    amount: 4,
-                    horizontal: ParticleNumber::decimal(0.125).unwrap(),
-                    vertical: ParticleNumber::decimal(0.75).unwrap(),
-                },
-                mapping_version: 0,
-            }
-        );
-        assert_eq!(parsed.to_value(), item);
-
-        let constructed = Item::particle(ParticleSpec::Dust {
-            color: 0xabcdef,
-            color_variation: 0.into(),
-            size: ParticleNumber::decimal(1.25).unwrap(),
-            size_variation: 0.into(),
-        });
-        assert!(matches!(
-            &constructed,
-            Item::Particle {
-                cluster: catalog::ParticleCluster { amount: 1, .. },
-                ..
-            },
-        ));
-        let encoded = constructed.to_value();
-        assert_eq!(Item::from_item_value(&encoded).unwrap(), constructed);
-    }
-
-    #[test]
-    fn particle_item_requires_exactly_the_fields_in_its_dump_schema() {
-        let mut missing_motion = json!({
-            "version": 1,
-            "id": "part",
-            "data": {
-                "mappingVersion": 0,
-                "particle": "minecraft:geyser_base",
-                "cluster": {"amount": 1, "horizontal": 0.0, "vertical": 0.0},
-                "data": {
-                    "motionVariation": 100,
-                    "waterBlocks": 2,
-                    "burstImpulse": 1.0
-                }
-            }
-        });
-        assert!(Item::from_item_value(&missing_motion).is_err());
-
-        missing_motion["data"]["data"]["x"] = json!(0.0);
-        missing_motion["data"]["data"]["y"] = json!(0.0);
-        missing_motion["data"]["data"]["z"] = json!(0.0);
-        missing_motion["data"]["data"]["other"] = json!(1);
-        assert!(Item::from_item_value(&missing_motion).is_err());
-    }
-
-    #[test]
-    fn supplied_particle_template_parses_and_round_trips() {
-        let code = "H4sIAAAAAAAA/7VVTU/DMAz9KyjnCrWDblNvcOBDIHHbBaHKS9MuWppUSQrb0P47TptBNlVctp6aj+dnPzt2v8lSKLo2JHv/JrwgWb8nkf9mpGwlxS3oCkGIsaz2aFy5k0+mDVeSZEnUMzSgLVoUYMHd19A0XFaLAyyOOgSngiG45pJRDaXNWFky6gypaI1l2tlCrVppO+qV0nynpAWBFNdIgn6RxG/3gT9l0c8CNAfbxxU7l+rLUSbOUldLXE1ns9kkSdGfEkoH+Hi/RzojlHXr6PJKK7Y1TOdLMOx8uRsvautxO/8dTsMXoKt7X/IJVrnVxj7XTSswFiRKA+3JGNoNbcU6pyt8TyOK10qIf/IQiJyMIdJq4OIi6uJBdf37TW/TeRIPvN+IWF5jRJNQ6M0YQgvUl3f+c9QsDe8iOFv4oUGTZDofFmj4jvnau+XxJZrnJRTsuJVvx0jAYVqeO7NcW3J3Tt7uXvLXt0cSRJ6OETmTltttfqmp+1eyeTwfLNnwQFINUIzjtC2ng5JjL3nFZSi5O3P/qY436O3hxB1YliK3UAU8qukDIw8gutHsrjPybK6eeFEw97CBekixlVBzevqjDJxP9x+/+SFsA3WDFcCzH3+L5HtzBwAA";
-        let parsed = Script::decompile(code).unwrap();
-        let compiled = parsed.compile().unwrap();
-        assert_eq!(
-            parsed.to_value(),
-            Script::decompile(&compiled).unwrap().to_value()
-        );
-    }
-
-    #[test]
-    fn action_alternatives_validate_and_parse_by_argument_form() {
-        let player_heal: Vec<_> = Action::variants(BlockKind::PlayerAction, "Heal").collect();
-        assert_eq!(
-            player_heal,
-            vec![
-                Action::PlayerActionHeal,
-                Action::PlayerActionHealAlternative2
-            ]
-        );
-        assert_eq!(player_heal[0].spec().alternative_index, 1);
-        assert_eq!(player_heal[1].spec().alternative_index, 2);
-
-        for (action, arguments) in [
-            (Action::PlayerActionHeal, vec![Item::Number("2".into())]),
-            (Action::PlayerActionHealAlternative2, vec![]),
-            (Action::EntityActionHeal, vec![Item::Number("2".into())]),
-            (Action::EntityActionHealAlternative2, vec![]),
-        ] {
-            let call = ActionCall::new(action, arguments).unwrap();
-            let parsed = ActionCall::from_value(&call.to_value()).unwrap();
-            assert_eq!(parsed.action(), action);
-            assert_eq!(parsed.to_value(), call.to_value());
-        }
-    }
-
-    #[test]
-    fn structured_blocks_round_trip_and_count_physical_brackets() {
-        let event = action(BlockKind::Event, "PlayerDmgPlayer");
-        let mut script = Script::new(Header::event(event, vec![]).unwrap());
-        let condition = action(BlockKind::IfVar, "=");
-        let condition = ActionCall::new(
-            condition,
-            vec![Item::Number("1".into()), Item::Number("1".into())],
-        )
-        .unwrap();
-        let message = action(BlockKind::PlayerAction, "SendMessage");
-        let body = vec![Block::action(message, vec![Item::Component("hello".into())]).unwrap()];
-        script.push(Block::conditional(condition, body.clone(), Some(body)).unwrap());
-        assert_eq!(script.block_count(), 9);
-
-        let decoded = Script::from_value(script.to_value()).unwrap();
-        assert_eq!(decoded.to_value(), script.to_value());
-        let compiled = script.compile().unwrap();
-        assert_eq!(
-            Script::decompile(&compiled).unwrap().to_value(),
-            script.to_value()
-        );
-    }
-
-    #[test]
-    fn bundled_templates_parse_into_typed_scripts() {
-        let mut failures = Vec::new();
-        let mut round_trip_changes = Vec::new();
-        for sample in 1..=27 {
-            let path = format!(
-                "{}/.agents/skills/diamondfire/assets/samples/sample{sample}.txt",
-                env!("CARGO_MANIFEST_DIR")
-            );
-            let code = std::fs::read_to_string(path).unwrap();
-            match Script::decompile(&code) {
-                Err(error) => failures.push(format!("sample{sample}: {error}")),
-                Ok(script) => {
-                    use base64::Engine;
-                    use std::io::Read;
-                    let compact = code.trim();
-                    let mut normalized = compact.trim_end_matches('=').to_owned();
-                    match normalized.len() % 4 {
-                        0 => {}
-                        2 => normalized.push_str("=="),
-                        3 => normalized.push('='),
-                        _ => continue,
-                    }
-                    let compressed = base64::engine::general_purpose::STANDARD
-                        .decode(normalized)
-                        .unwrap();
-                    let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
-                    let mut bytes = Vec::new();
-                    decoder.read_to_end(&mut bytes).unwrap();
-                    let original: Value = serde_json::from_slice(&bytes).unwrap();
-                    if script.to_value() != original {
-                        let before = original["blocks"].as_array().unwrap();
-                        let after = script.to_value()["blocks"].as_array().unwrap().clone();
-                        let differences = before
-                            .iter()
-                            .zip(&after)
-                            .enumerate()
-                            .filter_map(|(index, (left, right))| {
-                                let left = left.as_object()?;
-                                let right = right.as_object()?;
-                                let keys: Vec<_> = left
-                                    .keys()
-                                    .chain(right.keys())
-                                    .filter(|key| left.get(*key) != right.get(*key))
-                                    .cloned()
-                                    .collect();
-                                (!keys.is_empty()).then(|| format!("{index}:{keys:?}"))
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        round_trip_changes.push(format!(
-                            "sample{sample}: {differences}; before={:?}; after={:?}",
-                            before
-                                .iter()
-                                .flat_map(|block| block["args"]["items"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten())
-                                .map(item_summary)
-                                .collect::<Vec<_>>(),
-                            after
-                                .iter()
-                                .flat_map(|block| block["args"]["items"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten())
-                                .map(item_summary)
-                                .collect::<Vec<_>>()
-                        ));
-                    }
-
-                    fn item_summary(item: &Value) -> String {
-                        let payload = &item["item"];
-                        let data = &payload["data"];
-                        format!(
-                            "{}:{}:{}",
-                            item["slot"],
-                            payload["id"].as_str().unwrap_or("?"),
-                            data.get("tag")
-                                .and_then(Value::as_str)
-                                .or_else(|| data.get("name").and_then(Value::as_str))
-                                .unwrap_or("")
-                        )
-                    }
-                }
-            }
-        }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
-        assert!(
-            round_trip_changes.is_empty(),
-            "round-trip changed samples: {}",
-            round_trip_changes.join(", ")
-        );
-    }
-
-    #[test]
-    fn functions_and_dynamic_calls_use_typed_headers_and_blocks() {
-        assert_eq!(Action::ALL.len(), 1323);
-        let parameter = FunctionParameter::new("count", ParameterType::Number);
-        let header =
-            Header::function_with_parameters("count_players", true, vec![parameter]).unwrap();
-        let mut script = Script::new(header);
-        let call_action = action(BlockKind::CallFunc, "dynamic");
-        let call =
-            ActionCall::dynamic(call_action, "count_players", vec![Item::Number("1".into())])
-                .unwrap();
-        script.push(Block::call(call).unwrap());
-        let output = script.compile().unwrap();
-        assert_eq!(
-            Script::decompile(&output).unwrap().to_value(),
-            script.to_value()
-        );
     }
 }

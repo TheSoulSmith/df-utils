@@ -1,3 +1,4 @@
+#[derive(Clone, Copy, Debug)]
 pub struct RawTextNum(usize);
 
 impl RawTextNum {
@@ -51,6 +52,7 @@ fn lint(text: &String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Debug)]
 pub enum NumTextCode {
     Raw {
         v: RawTextNum,
@@ -84,6 +86,7 @@ pub enum NumTextCode {
     },
 }
 
+#[derive(Clone, Debug)]
 pub enum StrTextCode {
     Raw {
         v: String,
@@ -130,11 +133,13 @@ pub enum StrTextCode {
     SelectedUUID,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum Operation {
     Add,
-    Subtract,
-    Multiply,
-    Divide,
+    Sub,
+    Mult,
+    Div,
+    Mod,
 }
 
 impl NumTextCode {
@@ -156,9 +161,10 @@ impl NumTextCode {
                 for (op, code) in rest {
                     out.push_str(match op {
                         Operation::Add => "+",
-                        Operation::Subtract => "-",
-                        Operation::Multiply => "*",
-                        Operation::Divide => "/",
+                        Operation::Sub => "-",
+                        Operation::Mult => "*",
+                        Operation::Div => "/",
+                        Operation::Mod => "%",
                     });
                     code.compile_helper(out)?;
                 }

@@ -1,6 +1,6 @@
 use super::{
     internals::LineInternals,
-    raw::*,
+    raw::{VariableScope::Line, *},
     text_codes::{NumTextCode::*, *},
 };
 
@@ -11,6 +11,7 @@ pub enum Op {
     Sub(B),
     Mul(B),
     Div(B),
+    DivF(B),
     Mod(B),
     Exp(B),
     Root(B),
@@ -147,6 +148,72 @@ impl std::ops::Sub for PassState {
     }
 }
 
+impl std::ops::Mul for PassState {
+    type Output = PassState;
+    fn mul(self, rhs: Self) -> Self::Output {
+        match rhs {
+            Self::Math(rhs_start, rhs_rest) => match self {
+                Self::Math(s_start, s_rest) => {
+                    let mut rest = s_rest;
+                    rest.push((Operation::Mult, rhs_start));
+                    rest.append(&mut rhs_rest.clone());
+                    Self::Math(s_start, rest)
+                }
+                o => {
+                    let mut rest = Vec::new();
+                    rest.push((Operation::Mult, rhs_start));
+                    Self::Math(o.into(), rest)
+                }
+            },
+            rh => match self {
+                Self::Math(s_start, s_rest) => {
+                    let mut rest = s_rest;
+                    rest.push((Operation::Mult, rh.into()));
+                    Self::Math(s_start, rest)
+                }
+                o => {
+                    let mut rest = Vec::new();
+                    rest.push((Operation::Mult, rh.into()));
+                    Self::Math(o.into(), rest)
+                }
+            },
+        }
+    }
+}
+
+impl std::ops::Div for PassState {
+    type Output = PassState;
+    fn div(self, rhs: Self) -> Self::Output {
+        match rhs {
+            Self::Math(rhs_start, rhs_rest) => match self {
+                Self::Math(s_start, s_rest) => {
+                    let mut rest = s_rest;
+                    rest.push((Operation::Div, rhs_start));
+                    rest.append(&mut rhs_rest.clone());
+                    Self::Math(s_start, rest)
+                }
+                o => {
+                    let mut rest = Vec::new();
+                    rest.push((Operation::Div, rhs_start));
+                    Self::Math(o.into(), rest)
+                }
+            },
+            rh => match self {
+                Self::Math(s_start, s_rest) => {
+                    let mut rest = s_rest;
+                    rest.push((Operation::Div, rh.into()));
+                    Self::Math(s_start, rest)
+                }
+                o => {
+                    let mut rest = Vec::new();
+                    rest.push((Operation::Div, rh.into()));
+                    Self::Math(o.into(), rest)
+                }
+            },
+        }
+    }
+}
+
 impl Into<NumTextCode> for PassState {
     fn into(self) -> NumTextCode {
         match self {
@@ -160,43 +227,155 @@ impl Into<NumTextCode> for PassState {
     }
 }
 
+impl TryInto<Item> for PassState {
+    type Error = String;
+    fn try_into(self) -> Result<Item, Self::Error> {
+        match self {
+            Self::Var(name) => Ok(Item::Variable {
+                name: name.compile()?,
+                scope: Line,
+            }),
+            o => Ok(Item::Number(Into::<NumTextCode>::into(o).compile()?)),
+        }
+    }
+}
+
 impl Op {
-    pub fn compile(self, mut internals: LineInternals) -> (Chunk, NumTextCode) {
+    pub fn compile(self, internals: &LineInternals) -> Result<(Chunk, NumTextCode), String> {
         let mut chunk = Chunk::new();
-        let code = self.compile_helper(&mut AlgebraState::new(), &mut internals, &mut chunk);
-        (chunk, code.into())
+        let mut m_internals = internals.clone();
+        let code = self.compile_helper(&mut AlgebraState::new(), &mut m_internals, &mut chunk)?;
+        Ok((chunk, code.into()))
     }
     fn compile_helper(
         self,
         algebra: &mut AlgebraState,
         internals: &mut LineInternals,
         chunk: &mut Chunk,
-    ) -> PassState {
+    ) -> Result<PassState, String> {
         match self {
-            Self::Raw(v) => PassState::Norm(Raw { v }),
-            Self::Var(name) => PassState::Var(name),
+            Self::Raw(v) => Ok(PassState::Norm(Raw { v })),
+            Self::Var(name) => Ok(PassState::Var(name)),
             Self::Add(args) => {
                 let a = args.0;
                 let b = args.1;
                 match algebra.t {
                     OpCat::Add | OpCat::None => {
-                        let a_out = a.compile_helper(algebra, internals, chunk);
+                        let a_out = a.compile_helper(algebra, internals, chunk)?;
                         algebra.t = OpCat::Add;
-                        let b_out = b.compile_helper(algebra, internals, chunk);
-                        if algebra.negate {
+                        let b_out = b.compile_helper(algebra, internals, chunk)?;
+                        Ok(if algebra.negate {
                             a_out - b_out
                         } else {
                             a_out + b_out
-                        }
+                        })
                     }
                     OpCat::Mult => {
                         let mut new_algebra = AlgebraState::new();
-                        let a_out = a.compile_helper(&mut new_algebra, internals, chunk);
-                        algebra.t = OpCat::Mult;
-                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk);
-                        PassState::Norm((a_out + b_out).into())
+                        let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
+                        algebra.t = OpCat::Add;
+                        algebra.negate = false;
+                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
+                        Ok(PassState::Norm((a_out + b_out).into()))
                     }
                 }
+            }
+            Self::Sub(args) => {
+                let a = args.0;
+                let b = args.1;
+                match algebra.t {
+                    OpCat::Add | OpCat::None => {
+                        let a_out = a.compile_helper(algebra, internals, chunk)?;
+                        algebra.t = OpCat::Add;
+                        algebra.negate = !algebra.negate;
+                        let b_out = b.compile_helper(algebra, internals, chunk)?;
+                        Ok(if algebra.negate {
+                            a_out + b_out
+                        } else {
+                            a_out - b_out
+                        })
+                    }
+                    OpCat::Mult => {
+                        let mut new_algebra = AlgebraState::new();
+                        let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
+                        algebra.t = OpCat::Add;
+                        algebra.negate = true;
+                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
+                        Ok(PassState::Norm((a_out - b_out).into()))
+                    }
+                }
+            }
+            Self::Mul(args) => {
+                let a = args.0;
+                let b = args.1;
+                match algebra.t {
+                    OpCat::Mult | OpCat::None => {
+                        let a_out = a.compile_helper(algebra, internals, chunk)?;
+                        algebra.t = OpCat::Mult;
+                        let b_out = b.compile_helper(algebra, internals, chunk)?;
+                        Ok(if algebra.negate {
+                            a_out / b_out
+                        } else {
+                            a_out * b_out
+                        })
+                    }
+                    OpCat::Add => {
+                        let mut new_algebra = AlgebraState::new();
+                        let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
+                        algebra.t = OpCat::Mult;
+                        algebra.negate = false;
+                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
+                        Ok(PassState::Norm((a_out * b_out).into()))
+                    }
+                }
+            }
+            Self::Div(args) => {
+                let a = args.0;
+                let b = args.1;
+                match algebra.t {
+                    OpCat::Mult | OpCat::None => {
+                        let a_out = a.compile_helper(algebra, internals, chunk)?;
+                        algebra.t = OpCat::Mult;
+                        algebra.negate = !algebra.negate;
+                        let b_out = b.compile_helper(algebra, internals, chunk)?;
+                        Ok(if algebra.negate {
+                            a_out / b_out
+                        } else {
+                            a_out * b_out
+                        })
+                    }
+                    OpCat::Add => {
+                        let mut new_algebra = AlgebraState::new();
+                        let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
+                        algebra.t = OpCat::Mult;
+                        algebra.negate = true;
+                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
+                        Ok(PassState::Norm((a_out * b_out).into()))
+                    }
+                }
+            }
+            Self::DivF(args) => {
+                let a = args.0;
+                let b = args.1;
+                let mut n_algebra = AlgebraState::new();
+                let a_out = a.compile_helper(&mut n_algebra, internals, chunk)?;
+                n_algebra = AlgebraState::new();
+                let b_out = b.compile_helper(&mut n_algebra, internals, chunk)?;
+                let out_name = internals.op_var();
+                chunk.push(
+                    Block::action(SetVar::Empty4 {
+                        params: (
+                            Item::Variable {
+                                name: out_name.clone(),
+                                scope: Line,
+                            },
+                            vec![a_out.try_into()?, b_out.try_into()?],
+                        ),
+                        tags: (Some(TagOptionsDefaultFloorResult::FloorResult),),
+                    })
+                    .unwrap(),
+                );
+                Ok(PassState::Var(StrTextCode::Raw { v: out_name }))
             }
             _ => panic!("Not implemented yet"),
         }

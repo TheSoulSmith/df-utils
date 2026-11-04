@@ -1,3 +1,5 @@
+use super::raw::Item;
+
 #[derive(Clone, Copy, Debug)]
 pub struct RawTextNum(usize);
 
@@ -292,5 +294,19 @@ impl StrTextCode {
             Self::VictimUUID => out.push_str("%victimuuid"),
         };
         Ok(())
+    }
+}
+
+impl TryInto<Item> for NumTextCode {
+    type Error = String;
+    fn try_into(self) -> Result<Item, Self::Error> {
+        Ok(Item::Number(self.compile()?))
+    }
+}
+
+impl TryInto<Item> for StrTextCode {
+    type Error = String;
+    fn try_into(self) -> Result<Item, Self::Error> {
+        Ok(Item::Text(self.compile()?))
     }
 }

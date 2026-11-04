@@ -1,4 +1,3 @@
-use super::raw::{Item, VariableScope::Line};
 #[derive(Clone)]
 pub struct LineInternals {
     op_mangler: Mangler,
@@ -20,6 +19,11 @@ impl Mangler {
 }
 
 impl LineInternals {
+    pub fn new() -> Self {
+        Self {
+            op_mangler: Mangler::new(),
+        }
+    }
     pub(crate) fn op_var(&mut self) -> String {
         format!("df-utils-internals-op:{}", self.op_mangler.id())
     }

@@ -76,10 +76,55 @@ impl AlgebraState {
     }
 }
 
+#[derive(Clone)]
 enum PassState {
     Math(NumTextCode, Vec<(Operation, NumTextCode)>),
     Norm(NumTextCode),
     Var(StrTextCode),
+}
+
+#[derive(Clone)]
+struct Pass {
+    state: PassState,
+    i: Vec<String>,
+    o: Vec<String>,
+}
+
+impl Pass {
+    fn add_in(mut self, i: StrTextCode) -> Result<Self, String> {
+        self.i.push(i.compile()?);
+        Ok(self)
+    }
+    fn add_out(mut self, o: StrTextCode) -> Result<Self, String> {
+        self.o.push(o.compile()?);
+        Ok(self)
+    }
+    fn wrap(mut self) -> Self {
+        self.state = PassState::Norm(self.state.into());
+        self
+    }
+    fn var(mut self, rhs: Self, name: String) -> Self {
+        for i in rhs.i {
+            match self.i.binary_search(&i) {
+                Ok(_) => {}
+                Err(t) => self.i.insert(t, i),
+            }
+        }
+        self.o = Vec::new();
+        self.o.push(name.clone());
+        self.state = PassState::Var(StrTextCode::Raw { v: name });
+        self
+    }
+}
+
+impl From<PassState> for Pass {
+    fn from(value: PassState) -> Self {
+        Self {
+            state: value,
+            i: Vec::new(),
+            o: Vec::new(),
+        }
+    }
 }
 
 impl std::ops::Add for PassState {
@@ -112,6 +157,26 @@ impl std::ops::Add for PassState {
                 }
             },
         }
+    }
+}
+
+impl std::ops::Add for Pass {
+    type Output = Self;
+    fn add(mut self, rhs: Self) -> Self::Output {
+        for i in rhs.i {
+            match self.i.binary_search(&i) {
+                Ok(_) => {}
+                Err(t) => self.i.insert(t, i),
+            }
+        }
+        for o in rhs.o {
+            match self.o.binary_search(&o) {
+                Ok(_) => {}
+                Err(t) => self.o.insert(t, o),
+            }
+        }
+        self.state = self.state + rhs.state;
+        self
     }
 }
 
@@ -148,6 +213,26 @@ impl std::ops::Sub for PassState {
     }
 }
 
+impl std::ops::Sub for Pass {
+    type Output = Self;
+    fn sub(mut self, rhs: Self) -> Self::Output {
+        for i in rhs.i {
+            match self.i.binary_search(&i) {
+                Ok(_) => {}
+                Err(t) => self.i.insert(t, i),
+            }
+        }
+        for o in rhs.o {
+            match self.o.binary_search(&o) {
+                Ok(_) => {}
+                Err(t) => self.o.insert(t, o),
+            }
+        }
+        self.state = self.state - rhs.state;
+        self
+    }
+}
+
 impl std::ops::Mul for PassState {
     type Output = PassState;
     fn mul(self, rhs: Self) -> Self::Output {
@@ -178,6 +263,26 @@ impl std::ops::Mul for PassState {
                 }
             },
         }
+    }
+}
+
+impl std::ops::Mul for Pass {
+    type Output = Self;
+    fn mul(mut self, rhs: Self) -> Self::Output {
+        for i in rhs.i {
+            match self.i.binary_search(&i) {
+                Ok(_) => {}
+                Err(t) => self.i.insert(t, i),
+            }
+        }
+        for o in rhs.o {
+            match self.o.binary_search(&o) {
+                Ok(_) => {}
+                Err(t) => self.o.insert(t, o),
+            }
+        }
+        self.state = self.state * rhs.state;
+        self
     }
 }
 
@@ -214,6 +319,26 @@ impl std::ops::Div for PassState {
     }
 }
 
+impl std::ops::Div for Pass {
+    type Output = Self;
+    fn div(mut self, rhs: Self) -> Self::Output {
+        for i in rhs.i {
+            match self.i.binary_search(&i) {
+                Ok(_) => {}
+                Err(t) => self.i.insert(t, i),
+            }
+        }
+        for o in rhs.o {
+            match self.o.binary_search(&o) {
+                Ok(_) => {}
+                Err(t) => self.o.insert(t, o),
+            }
+        }
+        self.state = self.state / rhs.state;
+        self
+    }
+}
+
 impl Into<NumTextCode> for PassState {
     fn into(self) -> NumTextCode {
         match self {
@@ -224,6 +349,12 @@ impl Into<NumTextCode> for PassState {
             Self::Norm(t) => t,
             Self::Var(name) => Var { name },
         }
+    }
+}
+
+impl Into<NumTextCode> for Pass {
+    fn into(self) -> NumTextCode {
+        self.state.into()
     }
 }
 
@@ -240,22 +371,33 @@ impl TryInto<Item> for PassState {
     }
 }
 
+impl TryInto<Item> for Pass {
+    type Error = String;
+    fn try_into(self) -> Result<Item, Self::Error> {
+        self.state.try_into()
+    }
+}
+
 impl Op {
     pub fn compile(self, internals: &LineInternals) -> Result<(Chunk, NumTextCode), String> {
         let mut chunk = Chunk::new();
         let mut m_internals = internals.clone();
         let code = self.compile_helper(&mut AlgebraState::new(), &mut m_internals, &mut chunk)?;
-        Ok((chunk, code.into()))
+        chunk.set_inputs(code.i);
+        chunk.set_outputs(code.o);
+        Ok((chunk, code.state.into()))
     }
     fn compile_helper(
         self,
         algebra: &mut AlgebraState,
         internals: &mut LineInternals,
         chunk: &mut Chunk,
-    ) -> Result<PassState, String> {
+    ) -> Result<Pass, String> {
         match self {
-            Self::Raw(v) => Ok(PassState::Norm(Raw { v })),
-            Self::Var(name) => Ok(PassState::Var(name)),
+            Self::Raw(v) => Ok(PassState::Norm(Raw { v }).into()),
+            Self::Var(name) => Ok(Pass::from(PassState::Var(name.clone()))
+                .add_in(name.clone())?
+                .add_out(name)?),
             Self::Add(args) => {
                 let a = args.0;
                 let b = args.1;
@@ -273,10 +415,10 @@ impl Op {
                     OpCat::Mult => {
                         let mut new_algebra = AlgebraState::new();
                         let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
-                        algebra.t = OpCat::Add;
-                        algebra.negate = false;
+                        new_algebra.t = OpCat::Add;
+                        new_algebra.negate = false;
                         let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
-                        Ok(PassState::Norm((a_out + b_out).into()))
+                        Ok((a_out + b_out).wrap())
                     }
                 }
             }
@@ -301,7 +443,7 @@ impl Op {
                         algebra.t = OpCat::Add;
                         algebra.negate = true;
                         let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
-                        Ok(PassState::Norm((a_out - b_out).into()))
+                        Ok((a_out - b_out).wrap())
                     }
                 }
             }
@@ -325,7 +467,7 @@ impl Op {
                         algebra.t = OpCat::Mult;
                         algebra.negate = false;
                         let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
-                        Ok(PassState::Norm((a_out * b_out).into()))
+                        Ok((a_out * b_out).wrap())
                     }
                 }
             }
@@ -350,7 +492,7 @@ impl Op {
                         algebra.t = OpCat::Mult;
                         algebra.negate = true;
                         let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
-                        Ok(PassState::Norm((a_out * b_out).into()))
+                        Ok((a_out * b_out).wrap())
                     }
                 }
             }
@@ -369,13 +511,13 @@ impl Op {
                                 name: out_name.clone(),
                                 scope: Line,
                             },
-                            vec![a_out.try_into()?, b_out.try_into()?],
+                            vec![a_out.clone().try_into()?, b_out.clone().try_into()?],
                         ),
                         tags: (Some(TagOptionsDefaultFloorResult::FloorResult),),
                     })
                     .unwrap(),
                 );
-                Ok(PassState::Var(StrTextCode::Raw { v: out_name }))
+                Ok(a_out.var(b_out, out_name))
             }
             _ => panic!("Not implemented yet"),
         }

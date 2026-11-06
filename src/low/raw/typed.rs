@@ -8,10 +8,7 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
-use super::{
-    super::text_codes::StrTextCode,
-    catalog::{self, BlockKind, ParticleCluster, ParticleSpec},
-};
+use super::catalog::{self, BlockKind, ParticleCluster, ParticleSpec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
@@ -741,14 +738,16 @@ pub type ConditionParts<'a> = (&'a ActionCall, &'a [Block], Option<&'a [Block]>)
 #[derive(Clone, Debug)]
 pub struct Chunk {
     instructions: Vec<Block>,
-    io: Vec<(StrTextCode, VariableScope, bool)>,
+    i: Vec<String>,
+    o: Vec<String>,
 }
 
 impl Chunk {
     pub fn new() -> Self {
         Self {
             instructions: Vec::new(),
-            io: Vec::new(),
+            i: Vec::new(),
+            o: Vec::new(),
         }
     }
 
@@ -769,6 +768,14 @@ impl Chunk {
             blocks: self.block_count(),
             limit,
         }
+    }
+
+    pub fn set_inputs(&mut self, i: Vec<String>) {
+        self.i = i;
+    }
+
+    pub fn set_outputs(&mut self, o: Vec<String>) {
+        self.o = o;
     }
 }
 

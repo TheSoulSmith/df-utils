@@ -145,14 +145,14 @@ pub enum Operation {
 }
 
 impl NumTextCode {
-    pub fn compile(self) -> Result<String, String> {
+    pub fn compile(&self) -> Result<String, String> {
         let mut out = String::new();
         match self.compile_helper(&mut out) {
             Ok(_) => Ok(out),
             Err(e) => Err(e),
         }
     }
-    fn compile_helper(self, out: &mut String) -> Result<(), String> {
+    fn compile_helper(&self, out: &mut String) -> Result<(), String> {
         match self {
             Self::Raw { v } => {
                 out.push_str(v.stringify().as_str());
@@ -218,14 +218,14 @@ impl NumTextCode {
 }
 
 impl StrTextCode {
-    pub fn compile(self) -> Result<String, String> {
+    pub fn compile(&self) -> Result<String, String> {
         let mut out = String::new();
         match self.compile_helper(&mut out, false) {
             Ok(_) => Ok(out),
             Err(e) => Err(e),
         }
     }
-    fn compile_helper(self, out: &mut String, should_lint: bool) -> Result<(), String> {
+    fn compile_helper(&self, out: &mut String, should_lint: bool) -> Result<(), String> {
         match self {
             Self::Raw { v } => {
                 if should_lint {

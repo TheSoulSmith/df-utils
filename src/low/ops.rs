@@ -60,6 +60,7 @@ enum OpCat {
     Add,
     Mult,
     None,
+    Other,
 }
 
 struct AlgebraState {
@@ -91,11 +92,11 @@ struct Pass {
 }
 
 impl Pass {
-    fn add_in(mut self, i: StrTextCode) -> Result<Self, String> {
+    fn add_in(mut self, i: &StrTextCode) -> Result<Self, String> {
         self.i.push(i.compile()?);
         Ok(self)
     }
-    fn add_out(mut self, o: StrTextCode) -> Result<Self, String> {
+    fn add_out(mut self, o: &StrTextCode) -> Result<Self, String> {
         self.o.push(o.compile()?);
         Ok(self)
     }
@@ -396,8 +397,8 @@ impl Op {
         match self {
             Self::Raw(v) => Ok(PassState::Norm(Raw { v }).into()),
             Self::Var(name) => Ok(Pass::from(PassState::Var(name.clone()))
-                .add_in(name.clone())?
-                .add_out(name)?),
+                .add_in(&name)?
+                .add_out(&name)?),
             Self::Add(args) => {
                 let a = args.0;
                 let b = args.1;
@@ -412,12 +413,12 @@ impl Op {
                             a_out + b_out
                         })
                     }
-                    OpCat::Mult => {
+                    OpCat::Mult | OpCat::Other => {
                         let mut new_algebra = AlgebraState::new();
                         let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
-                        new_algebra.t = OpCat::Add;
-                        new_algebra.negate = false;
-                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
+                        algebra.t = OpCat::Add;
+                        algebra.negate = false;
+                        let b_out = b.compile_helper(algebra, internals, chunk)?;
                         Ok((a_out + b_out).wrap())
                     }
                 }
@@ -437,12 +438,12 @@ impl Op {
                             a_out - b_out
                         })
                     }
-                    OpCat::Mult => {
+                    OpCat::Mult | OpCat::Other => {
                         let mut new_algebra = AlgebraState::new();
                         let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
                         algebra.t = OpCat::Add;
                         algebra.negate = true;
-                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
+                        let b_out = b.compile_helper(algebra, internals, chunk)?;
                         Ok((a_out - b_out).wrap())
                     }
                 }
@@ -461,12 +462,12 @@ impl Op {
                             a_out * b_out
                         })
                     }
-                    OpCat::Add => {
+                    OpCat::Add | OpCat::Other => {
                         let mut new_algebra = AlgebraState::new();
                         let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
                         algebra.t = OpCat::Mult;
                         algebra.negate = false;
-                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
+                        let b_out = b.compile_helper(algebra, internals, chunk)?;
                         Ok((a_out * b_out).wrap())
                     }
                 }
@@ -486,12 +487,12 @@ impl Op {
                             a_out * b_out
                         })
                     }
-                    OpCat::Add => {
+                    OpCat::Add | OpCat::Other => {
                         let mut new_algebra = AlgebraState::new();
                         let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
                         algebra.t = OpCat::Mult;
                         algebra.negate = true;
-                        let b_out = b.compile_helper(&mut new_algebra, internals, chunk)?;
+                        let b_out = b.compile_helper(algebra, internals, chunk)?;
                         Ok((a_out * b_out).wrap())
                     }
                 }
@@ -518,6 +519,19 @@ impl Op {
                     .unwrap(),
                 );
                 Ok(a_out.var(b_out, out_name))
+            }
+            Self::Mod(args) => {
+                let a = args.0;
+                let b = args.1;
+                let mut new_algebra = AlgebraState {
+                    negate: false,
+                    t: OpCat::Other,
+                };
+                let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
+                algebra.t = OpCat::Other;
+                algebra.negate = true;
+                let b_out = b.compile_helper(algebra, internals, chunk)?;
+                Ok((a_out * b_out).wrap())
             }
             _ => panic!("Not implemented yet"),
         }

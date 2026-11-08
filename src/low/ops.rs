@@ -388,6 +388,28 @@ impl Op {
         chunk.set_outputs(code.o);
         Ok((chunk, code.state.into()))
     }
+    pub fn assign(
+        self,
+        internals: &LineInternals,
+        name: String,
+        scope: VariableScope,
+    ) -> Result<Chunk, String> {
+        let mut chunk = Chunk::new();
+        let mut m_internals = internals.clone();
+        let code = self.compile_helper(&mut AlgebraState::new(), &mut m_internals, &mut chunk)?;
+        chunk.set_inputs(code.i.clone());
+        if scope == VariableScope::Line {
+            chunk.set_outputs(vec![name.clone()])
+        };
+        chunk.push(
+            Block::action(SetVar::Empty5 {
+                params: (Item::Variable { name, scope }, code.try_into()?),
+                tags: (),
+            })
+            .unwrap(),
+        );
+        Ok(chunk)
+    }
     fn compile_helper(
         self,
         algebra: &mut AlgebraState,
@@ -419,6 +441,7 @@ impl Op {
                         algebra.t = OpCat::Add;
                         algebra.negate = false;
                         let b_out = b.compile_helper(algebra, internals, chunk)?;
+                        *algebra = AlgebraState::new();
                         Ok((a_out + b_out).wrap())
                     }
                 }
@@ -444,6 +467,7 @@ impl Op {
                         algebra.t = OpCat::Add;
                         algebra.negate = true;
                         let b_out = b.compile_helper(algebra, internals, chunk)?;
+                        *algebra = AlgebraState::new();
                         Ok((a_out - b_out).wrap())
                     }
                 }
@@ -468,6 +492,7 @@ impl Op {
                         algebra.t = OpCat::Mult;
                         algebra.negate = false;
                         let b_out = b.compile_helper(algebra, internals, chunk)?;
+                        *algebra = AlgebraState::new();
                         Ok((a_out * b_out).wrap())
                     }
                 }
@@ -493,6 +518,7 @@ impl Op {
                         algebra.t = OpCat::Mult;
                         algebra.negate = true;
                         let b_out = b.compile_helper(algebra, internals, chunk)?;
+                        *algebra = AlgebraState::new();
                         Ok((a_out * b_out).wrap())
                     }
                 }
@@ -529,8 +555,9 @@ impl Op {
                 };
                 let a_out = a.compile_helper(&mut new_algebra, internals, chunk)?;
                 algebra.t = OpCat::Other;
-                algebra.negate = true;
+                algebra.negate = false;
                 let b_out = b.compile_helper(algebra, internals, chunk)?;
+                *algebra = AlgebraState::new();
                 Ok((a_out * b_out).wrap())
             }
             _ => panic!("Not implemented yet"),
